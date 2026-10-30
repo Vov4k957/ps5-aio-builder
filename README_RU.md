@@ -22,10 +22,10 @@
 
 | Профиль | Состав |
 |---|---|
-| `standard` | Публичный kstuff от EchoStretch, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus |
-| `extended` | То же, плюс klogsrv и Dump Forge |
-| `zftpd` | Как standard, но zftpd вместо ftpsrv |
-| `fpkg13` | То же, но вместо публичного kstuff — твой локальный `kstuff1.13-fpkg-dr-test8-restmode.elf` |
+| `standard` | Публичный kstuff от EchoStretch, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus, **YT Blocker v1.0.2, Hush, Dump Forge** |
+| `extended` | Старый расширенный профиль: kstuff, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus, klogsrv, Dump Forge |
+| `zftpd` | Старый альтернативный FTP-профиль: kstuff, elfldr, zftpd, nanoDNS, websrv, ShadowMountPlus |
+| `fpkg13` | Как новый standard, но с твоим локальным `kstuff1.13-fpkg-dr-test8-restmode.elf` вместо публичного kstuff |
 
 Первые три профиля доступны через GitHub Actions. **fpkg13 — только для локального запуска**, поскольку исходник kstuff из Discord пока недоступен на GitHub и не должен автоматически публиковаться.
 
@@ -47,6 +47,14 @@ python3 scripts/build.py --profile fpkg13
 Для нагрузки без публичного релиза используй `kind: manual` и `manual_filename`: такие файлы нужно предоставлять локально. Для проверки вручную можно указать `sha256`.
 
 Выбор GitHub осуществляется по времени публикации последнего релиза, включая alpha/beta/prerelease. Если последний релиз не содержит подходящий PS5 ELF, сборка прерывается, вместо того чтобы незаметно брать старую версию.
+
+## Порядок и задержки в standard и fpkg13
+
+Первые шесть нагрузок идут как в исходном AIO, с паузами 1000 мс; **после ShadowMountPlus — пауза 3000 мс**, далее **YT Blocker v1.0.2 → Hush → Dump Forge**, без дополнительных пауз (0 мс). Пауза устанавливается после отправки ELF загрузчику, а не после подтверждения запуска предыдущей нагрузки. Чтобы не менять время в других профилях, используются `profile_delays` в `config/payloads.json`.
+
+YT Blocker закреплён за **v1.0.2**, поскольку запрошена именно эта версия (`release_tag`). Hush и Dump Forge получают наиболее свежий доступный GitHub-релиз.
+
+**Предупреждение:** автор YT Blocker требует закрыть YouTube и сохранить копии системных баз/метаданных перед применением. Если AIO запускается непосредственно через Y2JB внутри открытого YouTube, эта последовательность не проверена на безопасность и может повредить настройку YouTube. Не использовать автоматически без проверки условий запуска.
 
 ## Осторожность
 

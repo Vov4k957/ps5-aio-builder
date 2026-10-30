@@ -130,6 +130,9 @@ def validate_config(config):
             if not REPO_PATTERN.fullmatch(cfg.get("repo", "")):
                 raise BuildError("Invalid repository in " + key)
             re.compile(cfg.get("asset_regex", ""))
+            tag = cfg.get("release_tag")
+            if tag is not None and (not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", tag)):
+                raise BuildError("Invalid pinned release tag in " + key)
         else:
             filename = cfg.get("manual_filename", "")
             if not filename.endswith(".elf") or Path(filename).name != filename:
@@ -145,6 +148,26 @@ def validate_config(config):
         for key in ids:
             if key not in config["payloads"]:
                 raise BuildError("Unknown payload %s in profile %s" % (key, name))
+    profile_delays = config.get("profile_delays", {})
+    if not isinstance(profile_delays, dict):
+        raise BuildError("profile_delays must be a mapping")
+    for profile, overrides in profile_delays.items():
+        if profile not in config["profiles"] or not isinstance(overrides, dict):
+            raise BuildError("Invalid profile delays: " + profile)
+        for key, milliseconds in overrides.items():
+            if key not in config["profiles"][profile]:
+                raise BuildError("Delay override for missing payload %s in %s" % (key, profile))
+            if type(milliseconds) is not int or not 0 <= milliseconds <= 60000:
+                raise BuildError("Invalid delay override for " + key)
+
+
+def effective_payload_config(config, profile, key):
+    """Return this profile's payload config without mutating other profiles."""
+    cfg = dict(config["payloads"][key])
+    overrides = config.get("profile_delays", {}).get(profile, {})
+    if key in overrides:
+        cfg["delay_ms"] = overrides[key]
+    return cfg
 
 
 def resolve_payload(key, cfg, repo_owner, token, manual_dir, cache_dir):
@@ -159,7 +182,7 @@ def resolve_payload(key, cfg, repo_owner, token, manual_dir, cache_dir):
         target.write_bytes(manual_file.read_bytes())
         origin = {"kind": "local", "source": str(manual_file)}
     else:
-        releases = release_assets(cfg["repo"], token)
+        releases = release_assets(cfg["repo"], token, tag=cfg.get("release_tag"))
         release, asset = select_asset(releases, cfg["asset_regex"],
                                       cfg.get("include_prerelease", True))
         url = download_asset(asset, target)
@@ -223,7 +246,7 @@ def main(argv=None):
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     resolved = []
     for key in config["profiles"][args.profile]:
-        cfg = config["payloads"][key]
+        cfg = effective_payload_config(config, args.profile, key)
         print("Resolving", key, flush=True)
         resolved.append(resolve_payload(key, cfg, "", token, args.manual_dir, cache_dir))
         print("  ->", resolved[-1]["origin"].get("version", "manual"),

@@ -80,6 +80,25 @@
       "asset_regex": "^zftpd-ps5-v[^/]+\\.elf$",
       "include_prerelease": true,
       "delay_ms": 1000
+    },
+    "yt-blocker": {
+      "name": "YT Blocker v1.0.2 (Epinorr)",
+      "kind": "github",
+      "repo": "Epinorr/y2jb-update-blocker",
+      "release_tag": "v1.0.2",
+      "asset_regex": "^YT-Blocker_v1\\.0\\.2\\.elf$",
+      "include_prerelease": false,
+      "delay_ms": 0,
+      "note": "Requires YouTube to be CLOSED. Modifies YouTube application metadata and system databases; backup first. Risk if launched through Y2JB with YouTube open."
+    },
+    "hush": {
+      "name": "Hush",
+      "kind": "github",
+      "repo": "disco-trooper/hush",
+      "asset_regex": "^hush\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 0,
+      "note": "Disables recent gameplay recording by patching SceAvCapture; supported on FW 13.60 per developer."
     }
   },
   "profiles": {
@@ -89,7 +108,10 @@
       "ftpsrv",
       "nanodns",
       "websrv",
-      "shadowmountplus"
+      "shadowmountplus",
+      "yt-blocker",
+      "hush",
+      "dump-forge"
     ],
     "fpkg13": [
       "kstuff-fpkg-manual",
@@ -97,7 +119,10 @@
       "ftpsrv",
       "nanodns",
       "websrv",
-      "shadowmountplus"
+      "shadowmountplus",
+      "yt-blocker",
+      "hush",
+      "dump-forge"
     ],
     "extended": [
       "kstuff-upstream",
@@ -117,5 +142,15 @@
       "websrv",
       "shadowmountplus"
     ]
+  },
+  "profile_delays": {
+    "standard": {
+      "shadowmountplus": 3000,
+      "dump-forge": 0
+    },
+    "fpkg13": {
+      "shadowmountplus": 3000,
+      "dump-forge": 0
+    }
   }
 }

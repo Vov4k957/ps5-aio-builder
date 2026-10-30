@@ -1,6 +1,15 @@
 name: Build PS5 AIO
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'config/**'
+      - 'scripts/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'Makefile'
   workflow_dispatch:
     inputs:
       profile:

@@ -15,6 +15,12 @@ Configurable PS5 all-in-one ELF builder that bundles selected release ELF files 
 - GitHub Actions can run public-source profiles, manually or nightly; resulting build artifacts are **not private** in this public repository.
 - Discord-only/manual ELF files are **local-only**. Never upload restricted binaries to this public repository or its workflow artifacts.
 
+## Standard/fpkg13 payload order (9 payloads)
+
+`kstuff → elfldr → ftpsrv → nanoDNS → websrv → ShadowMountPlus → [3000 ms] → YT Blocker v1.0.2 → [0 ms] → Hush → [0 ms] → Dump Forge`. Earlier gaps remain 1000 ms. Delays are applied **after transmission**, not after process initialization. The 3-second delay only affects standard/fpkg13 through `profile_delays`; other profiles are unchanged. YT Blocker is pinned to exactly v1.0.2; Hush and Dump Forge track latest releases.
+
+**CAUTION:** YT Blocker's maintainer explicitly says to **close YouTube before running**, since it modifies system databases and application metadata. Loading this AIO through Y2JB while YouTube is still running may conflict with those requirements. Back up metadata, and do not enable this profile for automatic console startup before testing safe sequencing.
+
 ## Start a cloud build
 
 Go to **Actions → Build PS5 AIO → Run workflow**, choose `standard`, `extended`, or `zftpd`. Download the output from the run's Artifacts.
