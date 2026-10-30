@@ -23,7 +23,7 @@ Configurable PS5 all-in-one ELF builder that bundles selected release ELF files 
 
 ## Start a cloud build
 
-Go to **Actions → Build PS5 AIO → Run workflow**, choose `standard`, `extended`, or `zftpd`. Download the output from the run's Artifacts.
+Go to **Actions → Build PS5 AIO → Run workflow**, choose `standard`, `afterdns`, `extended`, or `zftpd`. Download the output from the run's Artifacts.
 
 ## Local build, including your manually sourced ELF
 
@@ -37,6 +37,8 @@ python3 scripts/build.py --profile fpkg13
 ```
 
 The `fpkg13` profile enforces the supplied ELF's exact SHA-256 and expects `manual/kstuff1.13-fpkg-dr-test8-rest-fast.elf` and intentionally fails if it is absent; it never substitutes a different kstuff version.
+
+The `afterdns` profile holds the same eight post-DNS payloads without re-launching nanoDNS; it is a preparation for the future updater, **not** the updater itself. `afterdns-fpkg13` requires the local private test8 ELF and cannot be built by the public cloud workflow. The original standard build is unchanged.
 
 ## Notes
 

@@ -19,6 +19,7 @@ on:
         type: choice
         options:
           - standard
+          - afterdns
           - extended
           - zftpd
   schedule:

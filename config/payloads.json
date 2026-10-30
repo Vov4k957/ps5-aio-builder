@@ -142,6 +142,26 @@
       "nanodns",
       "websrv",
       "shadowmountplus"
+    ],
+    "afterdns": [
+      "kstuff-upstream",
+      "elfldr",
+      "ftpsrv",
+      "websrv",
+      "shadowmountplus",
+      "yt-blocker",
+      "hush",
+      "dump-forge"
+    ],
+    "afterdns-fpkg13": [
+      "kstuff-fpkg-manual",
+      "elfldr",
+      "ftpsrv",
+      "websrv",
+      "shadowmountplus",
+      "yt-blocker",
+      "hush",
+      "dump-forge"
     ]
   },
   "profile_delays": {
@@ -150,6 +170,14 @@
       "dump-forge": 0
     },
     "fpkg13": {
+      "shadowmountplus": 3000,
+      "dump-forge": 0
+    },
+    "afterdns": {
+      "shadowmountplus": 3000,
+      "dump-forge": 0
+    },
+    "afterdns-fpkg13": {
       "shadowmountplus": 3000,
       "dump-forge": 0
     }
