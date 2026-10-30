@@ -36,7 +36,7 @@ python3 scripts/build.py --profile standard
 python3 scripts/build.py --profile fpkg13
 ```
 
-The `fpkg13` profile expects `manual/kstuff1.13-fpkg-dr-test8-restmode.elf` and intentionally fails if it is absent; it never substitutes a different kstuff version.
+The `fpkg13` profile enforces the supplied ELF's exact SHA-256 and expects `manual/kstuff1.13-fpkg-dr-test8-rest-fast.elf` and intentionally fails if it is absent; it never substitutes a different kstuff version.
 
 ## Notes
 

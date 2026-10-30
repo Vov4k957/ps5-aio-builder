@@ -11,11 +11,12 @@
       "note": "Public kstuff does not imply FPKG support on PS5 FW 13.60."
     },
     "kstuff-fpkg-manual": {
-      "name": "kstuff 1.13-fpkg-dr-test8-restmode (manual)",
+      "name": "kstuff 1.13-fpkg-dr-test8-rest-fast (user-supplied)",
       "kind": "manual",
-      "manual_filename": "kstuff1.13-fpkg-dr-test8-restmode.elf",
+      "manual_filename": "kstuff1.13-fpkg-dr-test8-rest-fast.elf",
       "delay_ms": 1000,
-      "note": "User-provided Discord build. Local only. Confirm provenance and compatibility."
+      "note": "User-supplied Discord ELF. Embedded banner: 'Welcome To Kstuff Lite 1.13-fpkg-dr-test8-rest'. FAST references present. Local-only; verify compatibility and provenance. This file MUST NOT be committed to a public repository.",
+      "sha256": "221fa41c43597677c1153d5224174be9062105c0c9a3379e96cb45d278aa52fc"
     },
     "elfldr": {
       "name": "ELF Loader",

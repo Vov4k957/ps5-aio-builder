@@ -21,6 +21,9 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(build.effective_payload_config(cfg, "extended", "shadowmountplus")["delay_ms"], 1000)
         self.assertEqual(build.effective_payload_config(cfg, "fpkg13", "shadowmountplus")["delay_ms"], 3000)
         self.assertEqual(cfg["profiles"]["fpkg13"][0], "kstuff-fpkg-manual")
+        manual = cfg["payloads"]["kstuff-fpkg-manual"]
+        self.assertEqual(manual["manual_filename"], "kstuff1.13-fpkg-dr-test8-rest-fast.elf")
+        self.assertEqual(manual["sha256"], "221fa41c43597677c1153d5224174be9062105c0c9a3379e96cb45d278aa52fc")
 
     def test_pinned_release_selection(self):
         from unittest.mock import patch

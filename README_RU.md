@@ -25,13 +25,13 @@
 | `standard` | Публичный kstuff от EchoStretch, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus, **YT Blocker v1.0.2, Hush, Dump Forge** |
 | `extended` | Старый расширенный профиль: kstuff, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus, klogsrv, Dump Forge |
 | `zftpd` | Старый альтернативный FTP-профиль: kstuff, elfldr, zftpd, nanoDNS, websrv, ShadowMountPlus |
-| `fpkg13` | Как новый standard, но с твоим локальным `kstuff1.13-fpkg-dr-test8-restmode.elf` вместо публичного kstuff |
+| `fpkg13` | Как новый standard, но с твоим локальным `kstuff1.13-fpkg-dr-test8-rest-fast.elf` вместо публичного kstuff |
 
-Первые три профиля доступны через GitHub Actions. **fpkg13 — только для локального запуска**, поскольку исходник kstuff из Discord пока недоступен на GitHub и не должен автоматически публиковаться.
+Первые три профиля доступны через GitHub Actions. **fpkg13 — только для локального запуска.** Файл `kstuff1.13-fpkg-dr-test8-rest-fast.elf` предоставлен пользователем, имеет SHA-256 `221fa41c43597677c1153d5224174be9062105c0c9a3379e96cb45d278aa52fc` и не должен попадать в открытый GitHub. Код сборщика сверяет хеш и остановится при несовпадении.
 
 ## Как собирать локально с Discord-нагрузкой
 
-На Linux установи [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk) по инструкции разработчика, задай `PS5_PAYLOAD_SDK`. Положи свою проверенную нагрузку в `manual/kstuff1.13-fpkg-dr-test8-restmode.elf` (точное имя), затем выполни:
+На Linux установи [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk) по инструкции разработчика, задай `PS5_PAYLOAD_SDK`. Положи предоставленную нагрузку с проверенным SHA-256 в `manual/kstuff1.13-fpkg-dr-test8-rest-fast.elf` (точное имя), затем выполни:
 
 ```bash
 python3 -m unittest discover -s tests -v
