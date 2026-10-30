@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "payloads": {
+    "kstuff-upstream": {
+      "name": "kstuff (EchoStretch)",
+      "kind": "github",
+      "repo": "EchoStretch/kstuff-lite",
+      "asset_regex": "^kstuff\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000,
+      "note": "Public kstuff does not imply FPKG support on PS5 FW 13.60."
+    },
+    "kstuff-fpkg-manual": {
+      "name": "kstuff 1.13-fpkg-dr-test8-restmode (manual)",
+      "kind": "manual",
+      "manual_filename": "kstuff1.13-fpkg-dr-test8-restmode.elf",
+      "delay_ms": 1000,
+      "note": "User-provided Discord build. Local only. Confirm provenance and compatibility."
+    },
+    "elfldr": {
+      "name": "ELF Loader",
+      "kind": "github",
+      "repo": "ps5-payload-dev/elfldr",
+      "asset_regex": "^elfldr-ps5\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    },
+    "ftpsrv": {
+      "name": "FTP Server",
+      "kind": "github",
+      "repo": "ps5-payload-dev/ftpsrv",
+      "asset_regex": "^ftpsrv-ps5\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    },
+    "nanodns": {
+      "name": "nanoDNS",
+      "kind": "github",
+      "repo": "drakmor/nanoDNS",
+      "asset_regex": "^nanodns\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    },
+    "websrv": {
+      "name": "Web Server",
+      "kind": "github",
+      "repo": "ps5-payload-dev/websrv",
+      "asset_regex": "^websrv-ps5\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    },
+    "shadowmountplus": {
+      "name": "ShadowMountPlus",
+      "kind": "github",
+      "repo": "drakmor/ShadowMountPlus",
+      "asset_regex": "^shadowmountplus\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    },
+    "klogsrv": {
+      "name": "Kernel Log Server",
+      "kind": "github",
+      "repo": "ps5-payload-dev/klogsrv",
+      "asset_regex": "^klogsrv-ps5\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    },
+    "dump-forge": {
+      "name": "Dump Forge",
+      "kind": "github",
+      "repo": "quer3q/ps5-dump-forge",
+      "asset_regex": "^ps5-dump-forge-[^/]+-ps5\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    },
+    "zftpd": {
+      "name": "zftpd (alternative FTP)",
+      "kind": "github",
+      "repo": "seregonwar/zftpd",
+      "asset_regex": "^zftpd-ps5-v[^/]+\\.elf$",
+      "include_prerelease": true,
+      "delay_ms": 1000
+    }
+  },
+  "profiles": {
+    "standard": [
+      "kstuff-upstream",
+      "elfldr",
+      "ftpsrv",
+      "nanodns",
+      "websrv",
+      "shadowmountplus"
+    ],
+    "fpkg13": [
+      "kstuff-fpkg-manual",
+      "elfldr",
+      "ftpsrv",
+      "nanodns",
+      "websrv",
+      "shadowmountplus"
+    ],
+    "extended": [
+      "kstuff-upstream",
+      "elfldr",
+      "ftpsrv",
+      "nanodns",
+      "websrv",
+      "shadowmountplus",
+      "klogsrv",
+      "dump-forge"
+    ],
+    "zftpd": [
+      "kstuff-upstream",
+      "elfldr",
+      "zftpd",
+      "nanodns",
+      "websrv",
+      "shadowmountplus"
+    ]
+  }
+}
