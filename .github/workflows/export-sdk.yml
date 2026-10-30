@@ -1,0 +1,31 @@
+name: Export PS5 SDK for local-only builds
+
+on:
+  push:
+    paths:
+      - '.github/workflows/export-sdk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download official SDK zip (public upstream)
+        run: |
+          curl --fail --location --retry 3 --output ps5-payload-sdk.zip \
+            https://github.com/ps5-payload-dev/sdk/releases/download/v0.45/ps5-payload-sdk.zip
+          unzip -tq ps5-payload-sdk.zip
+          sha256sum ps5-payload-sdk.zip > ps5-payload-sdk.SHA256SUMS
+      - name: Make public SDK available to local build environment
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps5-sdk-v0.45
+          path: |
+            ps5-payload-sdk.zip
+            ps5-payload-sdk.SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
