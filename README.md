@@ -2,6 +2,8 @@
 
 [Русская инструкция](README_RU.md)
 
+**Separate payload updates:** [PM AutoUpdate](pm/README_RU.md) now orchestrates the native Payload Manager 0.6.3 API. nanoDNS starts first; public ELF files are updated individually; kstuff remains local and manual. [Download the coordinator](https://github.com/Vov4k957/ps5-aio-builder/releases). SDK/test validation does not replace PS5 hardware testing.
+
 Configurable PS5 all-in-one ELF builder that bundles selected release ELF files and sequentially sends them to an already-running local ELF loader at `127.0.0.1:9021`.
 
 **Status:** experimental. Built for testing on firmware 13.60, but no compatibility or FPKG functionality is guaranteed. A successful build does not imply a working payload on the console.
@@ -12,7 +14,7 @@ Configurable PS5 all-in-one ELF builder that bundles selected release ELF files 
 - Use exact file name matching to select ELF64 x86-64 assets.
 - Select payload profiles, order and per-payload delays in [config/payloads.json](config/payloads.json).
 - Produce version, source, byte count and SHA-256 manifest alongside the resulting ELF and ZIP.
-- GitHub Actions can run public-source profiles, manually or nightly; resulting build artifacts are **not private** in this public repository.
+- GitHub Actions can run public-source AIO profiles manually; resulting build artifacts are **not private** in this public repository. The former nightly AIO build is disabled; the separate PM catalog refreshes every 15 minutes without rebuilding the coordinator.
 - Discord-only/manual ELF files are **local-only**. Never upload restricted binaries to this public repository or its workflow artifacts.
 
 ## Standard/fpkg13 payload order (9 payloads)
@@ -38,7 +40,7 @@ python3 scripts/build.py --profile fpkg13
 
 The `fpkg13` profile enforces the supplied ELF's exact SHA-256 and expects `manual/kstuff1.13-fpkg-dr-test8-rest-fast.elf` and intentionally fails if it is absent; it never substitutes a different kstuff version.
 
-The `afterdns` profile holds the same eight post-DNS payloads without re-launching nanoDNS; it is a preparation for the future updater, **not** the updater itself. `afterdns-fpkg13` requires the local private test8 ELF and cannot be built by the public cloud workflow. The original standard build is unchanged.
+The `afterdns` profile holds eight post-DNS payloads without re-launching nanoDNS; it is a legacy AIO profile, **not** the PM AutoUpdate coordinator. The new coordinator uses separate ELF files and does not need an afterdns build. `afterdns-fpkg13` still requires the local private test8 ELF and cannot be built by the public cloud workflow.
 
 ## Notes
 
@@ -49,3 +51,4 @@ The `afterdns` profile holds the same eight post-DNS payloads without re-launchi
 - [Reference analysis](docs/REFERENCE.md) describes the user-supplied AIO ELF whose behavior informed this implementation.
 
 This repository is open-source under MIT for the builder's own code only.
+

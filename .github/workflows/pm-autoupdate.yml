@@ -1,0 +1,105 @@
+name: PM AutoUpdate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pm/src/**'
+      - 'pm/tests/**'
+      - 'pm/Makefile'
+      - 'pm/generate_defaults.py'
+      - 'pm/generate_catalog.py'
+      - 'pm/package.py'
+      - 'pm/README_RU.md'
+      - 'config/payloads.json'
+      - 'scripts/build.py'
+      - '.github/workflows/pm-autoupdate.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pm-autoupdate
+  cancel-in-progress: false
+
+jobs:
+  catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Resolve public payload catalog (no kstuff)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 pm/generate_catalog.py
+      - name: Publish catalog only if contents changed
+        run: |
+          if ! git diff --quiet -- pm/payloads.json; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add pm/payloads.json
+            git commit -m 'Refresh separate PM payload catalog'
+            git push origin HEAD:main
+          fi
+
+  build:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Existing AIO tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Coordinator integration tests with memory checks
+        env:
+          PM_SANITIZE: '1'
+        run: python3 -m unittest discover -s pm/tests -v
+      - name: Install compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-18 lld-18 unzip make
+      - name: Cache official SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/ps5-payload-sdk
+          key: ps5-sdk-v0.45-linux-x86_64
+      - name: Install official SDK v0.45
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --output /tmp/sdk.zip \
+            https://github.com/ps5-payload-dev/sdk/releases/download/v0.45/ps5-payload-sdk.zip
+          sudo unzip -q /tmp/sdk.zip -d /opt
+          test -f "$PS5_PAYLOAD_SDK/toolchain/prospero.mk"
+      - name: Compile native PS5 ELF
+        run: make -C pm
+      - name: Inspect and package
+        run: |
+          readelf -h dist/pm-autoupdate.elf
+          python3 pm/package.py
+      - name: Save build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pm-autoupdate-${{ github.run_number }}
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: error
+      - name: Publish downloadable build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="pm-autoupdate-r${{ github.run_number }}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" \
+              --title "PM AutoUpdate 1.0.0 (build ${{ github.run_number }})" \
+              --notes-file pm/RELEASE_NOTES.md --latest
+          fi
+          gh release upload "$tag" dist/pm-autoupdate.elf dist/pm-autoupdate.zip \
+            dist/pm-autoupdate.json dist/SHA256SUMS dist/build-info.json --clobber

@@ -1,15 +1,6 @@
 name: Build PS5 AIO
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/build.yml'
-      - 'config/**'
-      - 'scripts/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'Makefile'
   workflow_dispatch:
     inputs:
       profile:
@@ -22,8 +13,6 @@ on:
           - afterdns
           - extended
           - zftpd
-  schedule:
-    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -62,3 +51,4 @@ jobs:
             dist/*.json
           if-no-files-found: error
           retention-days: 30
+
