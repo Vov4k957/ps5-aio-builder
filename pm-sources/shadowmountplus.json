@@ -1,0 +1,17 @@
+{
+  "name": "PS5 ShadowMountPlus (upstream)",
+  "payloads": [
+    {
+      "id": "aio-shadowmountplus",
+      "name": "ShadowMountPlus",
+      "filename": "shadowmountplus.elf",
+      "url": "https://github.com/drakmor/ShadowMountPlus/releases/download/1.7beta11/shadowmountplus.elf",
+      "version": "1.7beta11",
+      "last_update": "2026-10-29",
+      "checksum": "08c843018750bef013fe3a4de5f80c5c9738c6c2dafa2406e6b6e68d7585f3da",
+      "category": "Games",
+      "source": "https://github.com/drakmor/ShadowMountPlus",
+      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+    }
+  ]
+}

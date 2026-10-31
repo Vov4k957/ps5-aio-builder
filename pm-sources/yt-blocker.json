@@ -1,0 +1,17 @@
+{
+  "name": "PS5 YT Blocker (upstream)",
+  "payloads": [
+    {
+      "id": "aio-yt-blocker",
+      "name": "YT Blocker",
+      "filename": "YT-Blocker_v1.0.2.elf",
+      "url": "https://github.com/Epinorr/y2jb-update-blocker/releases/download/v1.0.2/YT-Blocker_v1.0.2.elf",
+      "version": "v1.0.2",
+      "last_update": "2026-10-18",
+      "checksum": "6ab006d92685e1ef67f9984549a5d4e8df24f6f59b2452e77c2737be6ed7df5a",
+      "category": "Utilities",
+      "source": "https://github.com/Epinorr/y2jb-update-blocker",
+      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+    }
+  ]
+}

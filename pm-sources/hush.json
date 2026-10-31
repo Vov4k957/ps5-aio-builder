@@ -1,0 +1,17 @@
+{
+  "name": "PS5 Hush (upstream)",
+  "payloads": [
+    {
+      "id": "aio-hush",
+      "name": "Hush",
+      "filename": "hush.elf",
+      "url": "https://github.com/disco-trooper/hush/releases/download/v1.0.0/hush.elf",
+      "version": "v1.0.0",
+      "last_update": "2026-10-25",
+      "checksum": "5c98dd0881b64eb00e90d58d90056a66193ef8ee50e2d9906a1e298b5a34c352",
+      "category": "Utilities",
+      "source": "https://github.com/disco-trooper/hush",
+      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+    }
+  ]
+}

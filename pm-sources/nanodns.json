@@ -1,0 +1,17 @@
+{
+  "name": "PS5 nanoDNS (upstream)",
+  "payloads": [
+    {
+      "id": "aio-nanodns",
+      "name": "nanoDNS",
+      "filename": "nanodns.elf",
+      "url": "https://github.com/drakmor/nanoDNS/releases/download/0.4/nanodns.elf",
+      "version": "0.4",
+      "last_update": "2026-08-04",
+      "checksum": "fcfb7d47c3b295560ea1603dc015f7c4950353ef0faca16428bd425680ef1fc5",
+      "category": "Networking",
+      "source": "https://github.com/drakmor/nanoDNS",
+      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+    }
+  ]
+}

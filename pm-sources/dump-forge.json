@@ -1,0 +1,17 @@
+{
+  "name": "PS5 Dump Forge (upstream)",
+  "payloads": [
+    {
+      "id": "aio-dump-forge",
+      "name": "Dump Forge",
+      "filename": "ps5-dump-forge-0.5.0-ps5.elf",
+      "url": "https://github.com/quer3q/ps5-dump-forge/releases/download/v0.5.0/ps5-dump-forge-0.5.0-ps5.elf",
+      "version": "v0.5.0",
+      "last_update": "2026-10-29",
+      "checksum": "f0cc32e772318f1ae53f1eccae207cb9aa1efb96d1a2a6249205bb3e0e478986",
+      "category": "Utilities",
+      "source": "https://github.com/quer3q/ps5-dump-forge",
+      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+    }
+  ]
+}

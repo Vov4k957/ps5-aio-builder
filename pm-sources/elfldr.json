@@ -1,0 +1,17 @@
+{
+  "name": "PS5 ELF Loader (upstream)",
+  "payloads": [
+    {
+      "id": "aio-elfldr",
+      "name": "ELF Loader",
+      "filename": "elfldr-ps5.elf",
+      "url": "https://github.com/ps5-payload-dev/elfldr/releases/download/v0.27/elfldr-ps5.elf",
+      "version": "v0.27",
+      "last_update": "2026-10-21",
+      "checksum": "82f6227610172c98bad6efe68219fc93a10027035991f47eb4b75532d023407d",
+      "category": "Loaders",
+      "source": "https://github.com/ps5-payload-dev/elfldr",
+      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+    }
+  ]
+}
