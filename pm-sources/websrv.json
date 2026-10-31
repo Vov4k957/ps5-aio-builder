@@ -7,11 +7,13 @@
       "filename": "websrv-ps5.elf",
       "url": "https://github.com/ps5-payload-dev/websrv/releases/download/v0.35/websrv-ps5.elf",
       "version": "v0.35",
-      "last_update": "2026-10-10",
       "checksum": "25501b41887a42789792d1367edd2fc892454bfe6b0b1519bc36456a581f264c",
-      "category": "Networking",
+      "last_update": "2026-10-10",
+      "description": "Web Server",
+      "category": "Vov4k957 Startup",
+      "author": "ps5-payload-dev",
       "source": "https://github.com/ps5-payload-dev/websrv",
-      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+      "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     }
   ]
 }

@@ -14,7 +14,7 @@ Configurable PS5 all-in-one ELF builder that bundles selected release ELF files 
 - Use exact file name matching to select ELF64 x86-64 assets.
 - Select payload profiles, order and per-payload delays in [config/payloads.json](config/payloads.json).
 - Produce version, source, byte count and SHA-256 manifest alongside the resulting ELF and ZIP.
-- GitHub Actions can run public-source AIO profiles manually; resulting build artifacts are **not private** in this public repository. The former nightly AIO build is disabled; the separate PM catalog refreshes every 15 minutes without rebuilding the coordinator.
+- GitHub Actions can run public-source AIO profiles manually; resulting build artifacts are **not private** in this public repository. The former nightly AIO build is disabled; the separate PM catalog refreshes every 10 minutes without rebuilding the coordinator.
 - Discord-only/manual ELF files are **local-only**. Never upload restricted binaries to this public repository or its workflow artifacts.
 
 ## Standard/fpkg13 payload order (9 payloads)

@@ -4,8 +4,10 @@
 #include "json.h"
 #include "http.h"
 #include "generated_defaults.h"
+#include "third_party/sha256.h"
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -27,7 +29,8 @@
 #include <sys/sysctl.h>
 #endif
 
-#define COUNT 9
+enum { NANODNS, KSTUFF, ELFLDR, FTPSRV, WEBSRV, SHADOWMOUNT, YT_BLOCKER, HUSH, DUMP_FORGE, COUNT };
+extern const unsigned char pm_dns_seed[], pm_dns_seed_end[];
 #define FILE_LIMIT (512LL*1024*1024)
 static const char *ids[COUNT]={"nanodns","kstuff-local","elfldr","ftpsrv","websrv","shadowmountplus","yt-blocker","hush","dump-forge"};
 static const char *basenames[COUNT]={"nanodns.elf","kstuff.elf","elfldr-ps5.elf","ftpsrv-ps5.elf","websrv-ps5.elf","shadowmountplus.elf","YT-Blocker_v1.0.2.elf","hush.elf",""};
@@ -37,7 +40,7 @@ typedef struct {
     int auto_update,ready_ms,api_ms,dns_ms,refresh_ms,install_ms,budget_ms,launch_ms;
     Step steps[COUNT];
 } Config;
-typedef struct { char slot[128],path[512],version[64],hash[65];int own; } Installed;
+typedef struct { char slot[128],path[512],version[64],hash[65];int own,needs_slot; } Installed;
 typedef struct { char version[64],hash[65];int present; } Available;
 static Config cfg;
 static int port=8084,updates=0,problems=0;
@@ -69,17 +72,20 @@ static char *read_text(const char *path,size_t limit) {
     int bad=fread(s,1,n,f)!=n; if(fclose(f))bad=1;
     if(bad||memchr(s,0,n)){free(s);errno=EINVAL;return NULL;}s[n]=0;return s;
 }
-static int atomic_text(const char *path,const char *text) {
+static int atomic_write(const char *path,const void *data,size_t len) {
     char tmp[1024];int n=snprintf(tmp,sizeof(tmp),"%s.tmp-XXXXXX",path);
     if(n<0||(size_t)n>=sizeof(tmp))return -1;
     int fd=mkstemp(tmp);if(fd<0)return -1;
-    size_t len=strlen(text),pos=0;int bad=0;
-    while(pos<len){ssize_t w=write(fd,text+pos,len-pos);if(w>0)pos+=(size_t)w;else if(w<0&&errno==EINTR)continue;else{bad=1;break;}}
+    const unsigned char *bytes=data;size_t pos=0;int bad=0;
+    while(pos<len){ssize_t w=write(fd,bytes+pos,len-pos);if(w>0)pos+=(size_t)w;else if(w<0&&errno==EINTR)continue;else{bad=1;break;}}
     if(fsync(fd))bad=1;
     if(close(fd))bad=1;
     if(!bad&&rename(tmp,path))bad=1;
     if(bad)unlink(tmp);
     return bad?-1:0;
+}
+static int atomic_text(const char *path,const char *text) {
+    return atomic_write(path,text,strlen(text));
 }
 static int valid_elf(const char *path) {
     int fd=open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW);if(fd<0)return 0;
@@ -87,6 +93,20 @@ static int valid_elf(const char *path) {
     int ok=!fstat(fd,&st)&&S_ISREG(st.st_mode)&&st.st_size>=64&&st.st_size<=FILE_LIMIT&&
         read(fd,h,sizeof(h))==(ssize_t)sizeof(h)&&!memcmp(h,"\177ELF\2\1",6)&&h[18]==62&&h[19]==0;
     close(fd);return ok;
+}
+/* A clean PS5 configured to use 127.0.0.1 cannot resolve GitHub yet.
+ * PM can launch any validated ELF below /data/pldmgr, even before it has a repo slot. */
+static int materialize_dns(Installed *dns) {
+    size_t size=(uintptr_t)pm_dns_seed_end-(uintptr_t)pm_dns_seed;
+    if(path_join(dns->path,sizeof(dns->path),"bootstrap-nanodns.elf") ||
+       atomic_write(dns->path,pm_dns_seed,size) || !valid_elf(dns->path))return -1;
+    dns->needs_slot=1;
+    logmsg("No local nanoDNS. Starting the bundled Drakmor bootstrap.");
+    return 0;
+}
+static void wait_gap(long long previous,int delay) {
+    long long remaining=previous+delay-clock_ms();
+    if(remaining>0)pause_ms((int)remaining);
 }
 static int backup_elf(int id,const char *source,char *dest,size_t cap) {
     char suffix[128];snprintf(suffix,sizeof(suffix),"fallback/%s.elf",ids[id]);
@@ -111,10 +131,24 @@ static int get_string(const Json *j,int obj,const char *key,char *out,size_t cap
     return json_string(j,json_get(j,obj,key),out,cap);
 }
 static int id_index(const char *id) {for(int i=0;i<COUNT;i++)if(!strcmp(id,ids[i]))return i;return -1;}
+/* Upgrade precisely the old shipped order. Keep custom paths, opt-outs and
+ * deliberately edited sequences. Do not rewrite the user's file. */
+static void migrate_v1(void) {
+    static const int old_delays[COUNT]={1000,1000,1000,1000,1000,3000,0,0,0};
+    for(int i=0;i<COUNT;i++)
+        if(cfg.steps[i].id!=i || cfg.steps[i].delay!=old_delays[i])return;
+    Step yt=cfg.steps[YT_BLOCKER];
+    cfg.steps[6]=cfg.steps[7];
+    cfg.steps[7]=cfg.steps[8];
+    cfg.steps[8]=yt;
+    for(int i=0;i<COUNT;i++) cfg.steps[i].delay=i<7?1000:(i==7?3000:0);
+    if(cfg.refresh_ms==10000)cfg.refresh_ms=120000;
+    if(cfg.budget_ms==300000)cfg.budget_ms=900000;
+}
 static int parse_config(char *text) {
     Json j;if(json_parse(&j,text))return -1;
     int schema,rc=-1;
-    if(json_int(&j,json_get(&j,0,"schema"),&schema)||schema!=1||
+    if(json_int(&j,json_get(&j,0,"schema"),&schema)||(schema!=1&&schema!=2)||
        get_string(&j,0,"source_url",cfg.source,sizeof(cfg.source))||
        strncmp(cfg.source,"https://",8)||strpbrk(cfg.source,"\r\n \t#")||
        get_string(&j,0,"bootstrap_nanodns",cfg.dns,sizeof(cfg.dns))||
@@ -133,7 +167,8 @@ static int parse_config(char *text) {
            json_bool(&j,json_get(&j,p,"enabled"),&s->enabled))goto done;
         seen|=1u<<s->id;p=j.t[p].next;
     }
-    if(cfg.steps[0].id!=0||!cfg.steps[0].enabled||cfg.steps[1].id!=1||!cfg.steps[1].enabled)goto done;
+    if(schema==1)migrate_v1();
+    if(cfg.steps[0].id!=NANODNS||!cfg.steps[0].enabled||cfg.steps[1].id!=KSTUFF)goto done;
     rc=0;
 done:
     /* Free tokens, but leave input ownership to caller. */
@@ -182,6 +217,12 @@ static int item_to_installed(const Json *j,int p,Installed *out,int own) {
     if(get_string(j,p,"path",x.path,sizeof(x.path))||get_string(j,p,"slot",x.slot,sizeof(x.slot))||!valid_elf(x.path))return -1;
     (void)get_string(j,p,"version",x.version,sizeof(x.version));
     (void)get_string(j,p,"checksum",x.hash,sizeof(x.hash));
+    if(json_eq(j,json_get(j,p,"source_url"),cfg.source) && x.hash[0]){
+        char actual[65];
+        if(compute_sha256_file(x.path,actual) || strcasecmp(actual,x.hash)){
+            logmsg("Ignoring damaged managed file %s",x.path);return -1;
+        }
+    }
     x.own=own;*out=x;return 0;
 }
 static int resolve_ref(const Json *j,const char *ref,Installed *out) {
@@ -198,9 +239,66 @@ static int resolve_ref(const Json *j,const char *ref,Installed *out) {
     }
     if(found){*out=candidate;return 0;}return -1;
 }
+static int private_kstuff_name(const char *name) {
+    const char *ext=strrchr(name,'.');
+    return !strncasecmp(name,"kstuff",6) && isdigit((unsigned char)name[6]) &&
+           strstr(name,"-fpkg-dr-") && ext && !strcasecmp(ext,".elf");
+}
+static int select_kstuff(const Json *j,Installed *out) {
+    if(!resolve_ref(j,cfg.kstuff,out))return 0;
+    /* An explicit custom reference wins, even if currently missing. */
+    if(strcmp(cfg.kstuff,"/data/pldmgr/kstuff.elf"))return -1;
+    Installed unique={0};
+    int a=json_get(j,0,"items");
+    if(a<0 || j->t[a].type!='[')return -1;
+    for(int p=a+1;p<j->t[a].next;p=j->t[p].next){
+        char name[256];Installed entry;
+        if(!json_eq(j,json_get(j,p,"kind"),"local") ||
+           get_string(j,p,"filename",name,sizeof(name)) || !private_kstuff_name(name) ||
+           item_to_installed(j,p,&entry,0))continue;
+        if(unique.path[0] && strcmp(unique.path,entry.path))goto ambiguous;
+        unique=entry;
+    }
+    DIR *dir=opendir("/data/pldmgr");
+    if(dir){
+        struct dirent *entry;
+        while((entry=readdir(dir))){
+            if(!private_kstuff_name(entry->d_name))continue;
+            char path[512];
+            snprintf(path,sizeof(path),"/data/pldmgr/%s",entry->d_name);
+            if(!valid_elf(path))continue;
+            if(unique.path[0] && strcmp(unique.path,path)){closedir(dir);goto ambiguous;}
+            snprintf(unique.path,sizeof(unique.path),"%s",path);
+        }
+        closedir(dir);
+    }
+    if(!unique.path[0])return -1;
+    *out=unique;return 0;
+ambiguous:
+    logmsg("Several local kstuff builds; set local_kstuff to the intended file");
+    return -1;
+}
+static int matches_item(const Json *j,int item,int id) {
+    char key[160],name[256];
+    snprintf(key,sizeof(key),"aio-%s",ids[id]);
+    if(json_eq(j,json_get(j,item,"id"),ids[id]) || json_eq(j,json_get(j,item,"id"),key))return 1;
+    if(id==DUMP_FORGE && json_eq(j,json_get(j,item,"id"),"ps5-dump-forge"))return 1;
+    if(get_string(j,item,"filename",name,sizeof(name)))return 0;
+    if(*basenames[id] && !strcasecmp(name,basenames[id]))return 1;
+    if(id==ELFLDR)return !strcasecmp(name,"elfldr.elf");
+    if(id==FTPSRV)return !strcasecmp(name,"ftpsrv.elf");
+    if(id==WEBSRV)return !strcasecmp(name,"websrv.elf");
+    char *ext=strrchr(name,'.');
+    if(!ext || strcasecmp(ext,".elf"))return 0;
+    *ext=0;
+    if(id==DUMP_FORGE)return !strcasecmp(name,"dump-forge") || !strcasecmp(name,"ps5-dump-forge") ||
+        (!strncasecmp(name,"ps5-dump-forge-",15) && strlen(name)>19 && !strcasecmp(name+strlen(name)-4,"-ps5"));
+    if(id==YT_BLOCKER)return !strcasecmp(name,"YT-Blocker") || !strncasecmp(name,"YT-Blocker_v",12);
+    return 0;
+}
 static int select_installed(const Json *j,int id,Installed *out) {
     *out=(Installed){0};
-    if(id==1)return resolve_ref(j,cfg.kstuff,out); /* No remote kstuff matching. */
+    if(id==KSTUFF)return select_kstuff(j,out); /* No remote kstuff matching. */
     int a=json_get(j,0,"items");if(a<0||j->t[a].type!='[')return -1;
     int count=0;Installed candidate={0};
     for(int p=a+1;p<j->t[a].next;p=j->t[p].next){
@@ -213,15 +311,31 @@ static int select_installed(const Json *j,int id,Installed *out) {
     if(id==0&&!resolve_ref(j,cfg.dns,out))return 0;
     count=0;
     for(int p=a+1;p<j->t[a].next;p=j->t[p].next){
-        int match=json_eq(j,json_get(j,p,"id"),ids[id])||
-            (*basenames[id]&&json_eq(j,json_get(j,p,"filename"),basenames[id]))||
-            (id==8&&json_eq(j,json_get(j,p,"id"),"ps5-dump-forge"));
+        int match=matches_item(j,p,id);
         if(match&&!item_to_installed(j,p,&candidate,0)){if(++count>1)return -1;}
     }
     if(count){*out=candidate;return 0;}
     char suffix[128];snprintf(suffix,sizeof(suffix),"fallback/%s.elf",ids[id]);
-    if(!path_join(out->path,sizeof(out->path),suffix)&&valid_elf(out->path))return 0;
+    if(!path_join(out->path,sizeof(out->path),suffix)&&valid_elf(out->path)){
+        out->needs_slot=1;return 0;
+    }
     out->path[0]=0;return -1;
+}
+/* An imported copy may already match even if multiple repositories have
+ * entries for the same ID. Prefer a byte-for-byte match to a new download. */
+static void prefer_matching_import(const Json *list,int id,const char *hash,Installed *chosen) {
+    if(chosen->own)return;
+    int items=json_get(list,0,"items");
+    if(items<0 || list->t[items].type!='[')return;
+    for(int p=items+1;p<list->t[items].next;p=list->t[p].next){
+        Installed candidate={0};
+        char actual[65];
+        if(json_eq(list,json_get(list,p,"source_url"),cfg.source) || !matches_item(list,p,id) ||
+           item_to_installed(list,p,&candidate,0))continue;
+        if(!compute_sha256_file(candidate.path,actual) && !strcasecmp(actual,hash)){
+            *chosen=candidate;return;
+        }
+    }
 }
 static int launch(const char *id,const char *path) {
     if(!valid_elf(path)){logmsg("Missing/invalid local ELF: %s (%s)",id,path);return -1;}
@@ -288,7 +402,6 @@ static int refresh_catalog(Available out[COUNT]) {
             if(v->present||get_string(&j,q,"version",v->version,sizeof(v->version))||!v->version[0]||
                get_string(&j,q,"checksum",v->hash,sizeof(v->hash))||!hash_valid(v->hash)||
                get_string(&j,q,"url",url,sizeof(url))||strncmp(url,"https://github.com/",19))goto done;
-            if(index==6&&strcmp(v->version,"v1.0.2")&&strcmp(v->version,"1.0.2")){logmsg("YT Blocker catalog is not pinned to v1.0.2");goto done;}
             v->present=1;
         }
     }
@@ -298,16 +411,28 @@ static int refresh_catalog(Available out[COUNT]) {
 done:
     json_free(&j);return rc;
 }
-static int update_payload(int id,const Available *available,Installed *installed) {
-    if(installed->own&&!strcasecmp(installed->hash,available->hash)){logmsg("Unchanged: %s %s",ids[id],installed->version);return 0;}
+static int update_payload(int id,const Available *available,Installed *installed,int gap,long long *last_install) {
+    /* PM repo metadata was verified against disk when selecting the item.
+     * An imported/local item may have no checksum metadata at all. */
+    char actual[65];
+    if(installed->path[0] && !installed->needs_slot){
+        const char *hash=installed->hash;
+        if(!installed->own || !hash[0])
+            hash=!compute_sha256_file(installed->path,actual)?actual:"";
+        if(!strcasecmp(hash,available->hash)){
+            logmsg("Unchanged: %s %s",ids[id],available->version);return 0;
+        }
+    }
     char backup[512]="";
-    if(installed->path[0]&&backup_elf(id,installed->path,backup,sizeof(backup))){logmsg("Cannot preserve previous %s; skipping update",ids[id]);problems++;return 0;}
+    if(installed->path[0]&&!installed->needs_slot&&backup_elf(id,installed->path,backup,sizeof(backup))){logmsg("Cannot preserve previous %s; skipping update",ids[id]);problems++;return 0;}
     char url[3072],route[3400];if(url_encode(cfg.source,url,sizeof(url)))return -1;
     /* mode=replace replaces only this source's slot. No replace_slot is sent:
      * local imports and slots from other sources are never deleted/remapped. */
     snprintf(route,sizeof(route),"/repository_install?source_url=%s&id=%s&mode=replace",url,ids[id]);
     Json j;int uncertain=0;logmsg("Installing %s %s via PM",ids[id],available->version);
+    wait_gap(*last_install,gap);
     int rc=action_ok(route,NULL,cfg.install_ms,&j,&uncertain);
+    *last_install=clock_ms();
     if(!rc){json_free(&j);Json fresh;
         if(!api_json("GET","/list_payloads",NULL,cfg.api_ms,&fresh,NULL)){
             Installed now={0};int ok=!select_installed(&fresh,id,&now)&&now.own&&!strcasecmp(now.hash,available->hash);
@@ -318,7 +443,7 @@ static int update_payload(int id,const Available *available,Installed *installed
     }
     problems++;
     if(backup[0]){snprintf(installed->path,sizeof(installed->path),"%s",backup);installed->slot[0]=0;installed->own=0;}
-    else installed->path[0]=0;
+    else if(!installed->needs_slot)installed->path[0]=0;
     if(uncertain){logmsg("PM may still finish installation; use saved ELF for this boot and stop issuing installs");return -1;}
     logmsg("Using previous local %s after rejected/failed update",ids[id]);return 0;
 }
@@ -371,21 +496,37 @@ int main(void) {
     int lock=open(path,O_CREAT|O_RDWR,0600);if(lock<0)return 2;
     if(flock(lock,LOCK_EX|LOCK_NB)){close(lock);notify("Another updater is running");return 0;}
     path_join(path,sizeof(path),"fallback");if(mkdir(path,0755)&&errno!=EEXIST){close(lock);return 2;}
-    path_join(path,sizeof(path),"last.log");logfile=fopen(path,"w");
-    logmsg("PM AutoUpdate %s; native PM API, local-only kstuff",PM_UPDATER_VERSION);
     int result=1;Json settings={0},installed_json={0};Installed installed[COUNT]={0};
     char boot[128],marker[1024];
     if(boot_identity(boot,sizeof(boot))||path_join(marker,sizeof(marker),"started-boot.txt")){notify("Cannot identify boot safely; stopped");goto done;}
     text=read_text(marker,256);
     if(text&&!strcmp(text,boot)){free(text);notify("Payload sequence already started this boot; restart PS5 to run again");result=0;goto done;}free(text);
+    path_join(path,sizeof(path),"last.log");logfile=fopen(path,"w");
+    logmsg("PM AutoUpdate %s; native PM API, local-only kstuff",PM_UPDATER_VERSION);
     if(wait_pm(&settings)||api_json("GET","/list_payloads",NULL,cfg.api_ms,&installed_json,NULL)){notify("PM API unavailable; no payloads started");goto done;}
     if(check_autoload(&settings,&installed_json)){notify("Keep only pm-autoupdate.elf in PM Autoload; stopped to avoid duplicate launches");goto done;}
-    for(int i=0;i<COUNT;i++)(void)select_installed(&installed_json,i,&installed[i]);
-    if(!installed[1].path[0]){notify("Local kstuff missing: place kstuff.elf in /data/pldmgr or set local_kstuff");goto done;}
-    if(!installed[0].path[0]){notify("Local nanoDNS missing: install it first or place /data/pldmgr/nanodns.elf");goto done;}
-    json_free(&installed_json);
+    (void)select_installed(&installed_json,NANODNS,&installed[NANODNS]);
     write_status("dns");
-    if(launch("nanodns",installed[0].path)){notify("nanoDNS launch failed; stopped (outcome may be unknown)");goto done;}
+    if(!installed[NANODNS].path[0] && materialize_dns(&installed[NANODNS])){
+        notify("Cannot prepare first-boot nanoDNS; see last.log");goto done;
+    }
+    char dns_marker[1024],pending[160];
+    if(path_join(dns_marker,sizeof(dns_marker),"dns-boot.txt"))goto done;
+    snprintf(pending,sizeof(pending),"pending-%s",boot);
+    text=read_text(dns_marker,256);
+    if(text && !strcmp(text,pending)){
+        free(text);notify("Previous nanoDNS delivery is uncertain; reboot before retrying");goto done;
+    }
+    int already_sent=text&&!strcmp(text,boot);free(text);
+    if(!already_sent){
+        /* A lost reply may still have launched nanoDNS. Never send it twice on a retry. */
+        if(atomic_text(dns_marker,pending)){notify("Cannot record nanoDNS boot marker");goto done;}
+        if(launch("nanodns",installed[NANODNS].path)){
+            notify("nanoDNS transfer failed or unknown; reboot before retrying");goto done;
+        }
+        if(atomic_text(dns_marker,boot)){notify("Cannot finalize nanoDNS boot marker");goto done;}
+    } else logmsg("nanoDNS was already sent this boot");
+    long long last_launch=clock_ms();
     pause_ms(cfg.steps[0].delay);
     int online=cfg.auto_update&&dns_ready();
     write_status("checking");
@@ -393,24 +534,31 @@ int main(void) {
     long long update_deadline=clock_ms()+cfg.budget_ms;
     Available available[COUNT]={0};
     if(online&&(ensure_source(&settings)||refresh_catalog(available))){online=0;problems++;logmsg("Source unavailable; using local payloads");}
+    for(int i=1;i<COUNT;i++)(void)select_installed(&installed_json,i,&installed[i]);
     if(online){
         write_status("updating");
+        long long last_install=last_launch;
         for(int i=0;i<COUNT;i++){Step *s=&cfg.steps[i];if(!s->enabled||s->id==1)continue;
             if(clock_ms()>=update_deadline){logmsg("Update budget reached; remaining payloads stay local");problems++;break;}
-            if(update_payload(s->id,&available[s->id],&installed[s->id]))break;
+            prefer_matching_import(&installed_json,s->id,available[s->id].hash,&installed[s->id]);
+            int gap=i?cfg.steps[i-1].delay:0;
+            if(update_payload(s->id,&available[s->id],&installed[s->id],gap,&last_install))break;
         }
     }
     json_free(&settings);
     /* Every operation above finishes or selects immutable fallback before this point. */
-    for(int i=1;i<COUNT;i++)if(cfg.steps[i].enabled&&!valid_elf(installed[cfg.steps[i].id].path)){
-        logmsg("Required payload unavailable: %s",ids[cfg.steps[i].id]);notify("Payload set incomplete; stopped before kstuff. See last.log");goto done;}
     if(atomic_text(marker,boot)){notify("Cannot record boot; stopped to prevent repeated kernel payloads");goto done;}
     write_status("launching");
     for(int i=1;i<COUNT;i++){
         Step *s=&cfg.steps[i];if(!s->enabled)continue;
-        if(s->id==6&&!youtube_closed()){logmsg("YT Blocker skipped: YouTube is running or its closed state cannot be verified");problems++;continue;}
+        if(!valid_elf(installed[s->id].path)){
+            logmsg("Skipping missing %s (%s)",ids[s->id],s->id==KSTUFF?cfg.kstuff:"no installed ELF");
+            problems++;continue;
+        }
+        wait_gap(last_launch,cfg.steps[i-1].delay);
+        if(s->id==YT_BLOCKER&&!youtube_closed()){logmsg("YT Blocker skipped: YouTube is running or its closed state cannot be verified");problems++;continue;}
         if(launch(ids[s->id],installed[s->id].path)){problems++;notify("Payload transfer failed; sequence stopped. Reboot before retrying");goto done;}
-        pause_ms(s->delay);
+        last_launch=clock_ms();
     }
     result=0;write_status("done");
     char summary[256];snprintf(summary,sizeof(summary),"Finished: %d updated, %d warning(s). nanoDNS updates apply next boot.",updates,problems);notify(summary);

@@ -7,11 +7,13 @@
       "filename": "nanodns.elf",
       "url": "https://github.com/drakmor/nanoDNS/releases/download/0.4/nanodns.elf",
       "version": "0.4",
-      "last_update": "2026-08-04",
       "checksum": "fcfb7d47c3b295560ea1603dc015f7c4950353ef0faca16428bd425680ef1fc5",
-      "category": "Networking",
+      "last_update": "2026-09-20",
+      "description": "nanoDNS",
+      "category": "Vov4k957 Startup",
+      "author": "drakmor",
       "source": "https://github.com/drakmor/nanoDNS",
-      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+      "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     }
   ]
 }

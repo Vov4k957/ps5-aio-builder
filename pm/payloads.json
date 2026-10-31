@@ -31,16 +31,16 @@
     },
     {
       "id": "ftpsrv",
-      "name": "FTP Server",
+      "name": "FTP Server (Drakmor stable)",
       "filename": "ftpsrv-ps5.elf",
-      "url": "https://github.com/ps5-payload-dev/ftpsrv/releases/download/v0.21.1/ftpsrv-ps5.elf",
-      "version": "v0.21.1",
-      "checksum": "7d4b31c83eae4e056580482a3a074e1db25922efc74ac1e439473b45d71a5938",
-      "last_update": "2026-08-20",
-      "description": "FTP Server",
+      "url": "https://github.com/drakmor/ftpsrv/releases/download/1.16-ng-stable/ftpsrv-ps5.elf",
+      "version": "1.16-ng-stable",
+      "checksum": "f19ae469b25453a7a4af4529527521d31f143100f18a2c6839666e7121c8bd32",
+      "last_update": "2026-09-20",
+      "description": "FTP Server (Drakmor stable)",
       "category": "Vov4k957 Startup",
-      "author": "ps5-payload-dev",
-      "source": "https://github.com/ps5-payload-dev/ftpsrv",
+      "author": "drakmor",
+      "source": "https://github.com/drakmor/ftpsrv",
       "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     },
     {
@@ -72,20 +72,6 @@
       "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     },
     {
-      "id": "yt-blocker",
-      "name": "YT Blocker v1.0.2 (Epinorr)",
-      "filename": "YT-Blocker_v1.0.2.elf",
-      "url": "https://github.com/Epinorr/y2jb-update-blocker/releases/download/v1.0.2/YT-Blocker_v1.0.2.elf",
-      "version": "v1.0.2",
-      "checksum": "6ab006d92685e1ef67f9984549a5d4e8df24f6f59b2452e77c2737be6ed7df5a",
-      "last_update": "2026-10-18",
-      "description": "Requires YouTube to be CLOSED. Modifies YouTube application metadata and system databases; backup first. Risk if launched through Y2JB with YouTube open.",
-      "category": "Vov4k957 Startup",
-      "author": "Epinorr",
-      "source": "https://github.com/Epinorr/y2jb-update-blocker",
-      "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
-    },
-    {
       "id": "hush",
       "name": "Hush",
       "filename": "hush.elf",
@@ -111,6 +97,20 @@
       "category": "Vov4k957 Startup",
       "author": "quer3q",
       "source": "https://github.com/quer3q/ps5-dump-forge",
+      "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
+    },
+    {
+      "id": "yt-blocker",
+      "name": "YT Blocker",
+      "filename": "YT-Blocker_v1.0.2.elf",
+      "url": "https://github.com/Epinorr/y2jb-update-blocker/releases/download/v1.0.2/YT-Blocker_v1.0.2.elf",
+      "version": "v1.0.2",
+      "checksum": "6ab006d92685e1ef67f9984549a5d4e8df24f6f59b2452e77c2737be6ed7df5a",
+      "last_update": "2026-10-18",
+      "description": "Requires YouTube to be CLOSED. Modifies YouTube application metadata and system databases; backup first. Risk if launched through Y2JB with YouTube open.",
+      "category": "Vov4k957 Startup",
+      "author": "Epinorr",
+      "source": "https://github.com/Epinorr/y2jb-update-blocker",
       "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     }
   ]

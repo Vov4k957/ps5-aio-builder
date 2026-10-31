@@ -36,6 +36,7 @@ class Fixture:
         self.source = defaults.SOURCE
         self.items = []
         self.available = []
+        self.release_bytes = {}
         self.events = []
         self.loads = []
         self.installs = []
@@ -48,6 +49,7 @@ class Fixture:
         self.bad_header = False
         for key in PUBLIC:
             data = elf(key + '-old')
+            self.release_bytes[key] = data
             path = root / (key + '.elf')
             path.write_bytes(data)
             checksum = hashlib.sha256(data).hexdigest()
@@ -63,7 +65,8 @@ class Fixture:
 
     def change(self, key):
         item = next(x for x in self.available if x['id'] == key)
-        item['version'] = 'v1.0.2' if key == 'yt-blocker' else '2'
+        item['version'] = 'v1.1.0' if key == 'yt-blocker' else '2'
+        self.release_bytes[key] = elf(key + '-new')
         item['checksum'] = hashlib.sha256(elf(key + '-new')).hexdigest()
 
     def handler(self):
@@ -133,13 +136,17 @@ class Fixture:
                         time.sleep(.3)
                     old = next((x for x in fixture.items if x.get('id') == key and x.get('source_url') == fixture.source), None)
                     if old is None:
-                        old = {'id': key, 'kind': 'repo', 'slot': 'repo/' + key + '@test',
-                               'source_url': fixture.source, 'path': str(fixture.root / (key + '.elf')),
-                               'filename': key + '.elf'}
+                        slot = 'repo/' + key + '@' + hashlib.sha256(fixture.source.encode()).hexdigest()[:8]
+                        folder = fixture.root / 'payloads' / slot
+                        folder.mkdir(parents=True, exist_ok=True)
+                        old = {'id': key, 'kind': 'repo', 'slot': slot, 'source_url': fixture.source,
+                               'path': str(folder / (key + '.elf')), 'filename': key + '.elf'}
                         fixture.items.append(old)
                     candidate = next(x for x in fixture.available if x['id'] == key)
                     old.update(version=candidate['version'], checksum=candidate['checksum'])
-                    Path(old['path']).write_bytes(elf(key + '-new'))
+                    Path(old['path']).write_bytes(fixture.release_bytes[key])
+                    if old['path'].startswith(str(fixture.root / 'payloads') + '/'):
+                        (Path(old['path']).parent / 'meta.json').write_text(json.dumps(old))
                     if mode == 'wrong_hash':
                         old['checksum'] = 'e' * 64
                     return self.reply({'ok': True, 'slot': old['slot']}, truncate=mode == 'truncated')
@@ -159,9 +166,12 @@ class UpdaterTests(unittest.TestCase):
         cls.builddir = tempfile.TemporaryDirectory()
         cls.binary = Path(cls.builddir.name) / 'pm-updater-host'
         subprocess.run(['python3', str(PM / 'generate_defaults.py')], check=True)
+        seed = Path(cls.builddir.name) / 'bootstrap-dns.elf'
+        seed.write_bytes(elf('bundled-nanodns'))
         options = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-no-pie'] if os.getenv('PM_SANITIZE') else []
         subprocess.run(['cc', '-DPM_HOST_TEST', '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-                        *options, '-I' + str(PM), '-I' + str(PM / 'src'),
+                        *options, f'-DPM_DNS_SEED="{seed}"', '-I' + str(PM), '-I' + str(PM / 'src'),
+                        str(PM / 'third_party/sha256.c'), str(PM / 'bootstrap/seed.S'),
                         *(str(PM / 'src' / f) for f in ['main.c', 'json.c', 'http.c']), '-o', str(cls.binary)], check=True)
 
     @classmethod
@@ -190,12 +200,12 @@ class UpdaterTests(unittest.TestCase):
         self.thread.join()
         self.tmp.cleanup()
 
-    def run_updater(self, *, dns='1', closed='1', text=None):
+    def run_updater(self, *, dns='1', closed='1', text=None, boot='test-boot'):
         path = self.root / 'config.json'
         path.write_text(text if text is not None else json.dumps(self.config))
         env = dict(os.environ, PM_CONFIG=str(path), PM_STATE_DIR=str(self.root / 'state'),
-                   PM_PORT=str(self.server.server_port), PM_TEST_DNS=dns, PM_TEST_YOUTUBE_CLOSED=closed)
-        result = subprocess.run([str(self.binary)], env=env, text=True, capture_output=True, timeout=10)
+                   PM_PORT=str(self.server.server_port), PM_TEST_DNS=dns, PM_TEST_YOUTUBE_CLOSED=closed, PM_TEST_BOOT=boot)
+        result = subprocess.run([str(self.binary)], env=env, text=True, capture_output=True, timeout=20)
         self.assertNotIn('AddressSanitizer', result.stderr)
         self.assertNotIn('runtime error:', result.stderr)
         return result
@@ -251,7 +261,7 @@ class UpdaterTests(unittest.TestCase):
                 marker.unlink(missing_ok=True)
                 self.fx.loads.clear()
                 self.fx.change('websrv')
-                r = self.run_updater()
+                r = self.run_updater(boot=mode)
                 self.assertEqual(r.returncode, 0, r.stdout)
                 self.assertEqual(self.fx.installs, [])
                 self.assertEqual(len(self.fx.loads), 9)
@@ -277,7 +287,7 @@ class UpdaterTests(unittest.TestCase):
                 Path(item['path']).write_bytes(old)
                 item['checksum'] = hashlib.sha256(old).hexdigest()
                 self.fx.install_mode['websrv'] = mode
-                r = self.run_updater()
+                r = self.run_updater(boot=mode)
                 self.assertEqual(r.returncode, 0, r.stdout)
                 self.assertEqual(self.fx.installs, ['websrv'])
                 self.assertIn('/fallback/websrv.elf', self.fx.loads[4][0])
@@ -291,18 +301,20 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.fx.installs, [x for x in PUBLIC if x != 'nanodns'])
         self.assertEqual(len(self.fx.loads), 9)
 
-    def test_missing_kstuff_stops_before_network_and_launch(self):
+    def test_missing_manual_kstuff_still_launches_all_eight(self):
         self.fx.kstuff.unlink()
         r = self.run_updater()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertEqual(self.fx.loads, [])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([Path(x[0]).stem for x in self.fx.loads], PUBLIC)
         self.assertEqual(self.fx.installs, [])
+        self.assertIn('Skipping missing kstuff-local', r.stdout)
 
-    def test_missing_public_and_offline_stops_before_kernel(self):
+    def test_missing_public_and_offline_launches_every_available_file(self):
         next(Path(x['path']) for x in self.fx.items if x.get('id') == 'websrv').unlink()
         r = self.run_updater(dns='0')
-        self.assertNotEqual(r.returncode, 0)
-        self.assertEqual(len(self.fx.loads), 1)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(len(self.fx.loads), 8)
+        self.assertFalse(any('websrv' in x[0] for x in self.fx.loads))
 
     def test_does_not_repeat_sequence_same_boot(self):
         self.assertEqual(self.run_updater().returncode, 0)
@@ -337,7 +349,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_invalid_config_does_nothing(self):
         for text in ['{', '{"schema":01}', '{"schema":1,"source_url":"\\u0000"}',
-                     json.dumps(self.config).replace('"schema": 1', '"schema": 1, "schema": 1'),
+                     json.dumps(self.config).replace('"schema": 2', '"schema": 2, "schema": 2'),
                      json.dumps(self.config).replace('"delay_ms": 0', '"delay_ms": -1', 1)]:
             with self.subTest(text=text[:80]):
                 r = self.run_updater(text=text)
@@ -345,7 +357,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.fx.events, [])
 
     def test_disabled_payload_is_neither_updated_nor_launched(self):
-        self.config['sequence'][6]['enabled'] = False
+        self.config['sequence'][-1]['enabled'] = False
         self.fx.change('yt-blocker')
         r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -365,18 +377,127 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.fx.installs, [])
         self.assertIn(b'private-manual-kstuff', self.fx.loads[1][1])
 
+    def test_empty_install_bootstraps_dns_then_builds_eight_slots(self):
+        for item in self.fx.items:
+            Path(item['path']).unlink()
+        self.fx.items.clear()
+        self.fx.source_present = self.fx.multi = False
+        r = self.run_updater()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.fx.loads[0][1], elf('bundled-nanodns'))
+        self.assertEqual(self.fx.installs, PUBLIC)
+        self.assertEqual(len(self.fx.loads), 8)
+        dns_load = next(i for i,e in enumerate(self.fx.events) if '/loadpayload:' in e[1])
+        add = next(i for i,e in enumerate(self.fx.events) if e[1]=='/sources_add')
+        self.assertLess(dns_load, add)
+        for item in self.fx.items:
+            path = Path(item['path'])
+            self.assertEqual(path.parent.parent, self.root / 'payloads/repo')
+            self.assertTrue((path.parent / 'meta.json').exists())
+        # The stored DNS is preferred on the next boot; no new installs.
+        (self.root / 'state/started-boot.txt').unlink()
+        (self.root / 'state/dns-boot.txt').unlink()
+        self.fx.loads.clear()
+        self.fx.installs.clear()
+        r = self.run_updater()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.fx.installs, [])
+        self.assertEqual(self.fx.loads[0][1], elf('nanodns-old'))
+
+    def test_identical_local_import_is_not_downloaded(self):
+        ftp = next(x for x in self.fx.items if x.get('id')=='ftpsrv')
+        ftp.update(filename='ftpsrv-ps5.elf', kind='local')
+        for field in ('id','version','source_url','checksum'):
+            del ftp[field]
+        r = self.run_updater()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.fx.installs, [])
+        self.assertEqual(self.fx.loads[3][1], elf('ftpsrv-old'))
+
+    def test_corrupt_managed_file_is_downloaded_even_if_metadata_current(self):
+        ftp = next(x for x in self.fx.items if x.get('id')=='ftpsrv')
+        Path(ftp['path']).write_bytes(elf('damaged-file'))
+        r = self.run_updater()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.fx.installs, ['ftpsrv'])
+        self.assertEqual(self.fx.loads[3][1], elf('ftpsrv-old'))
+
+    def test_new_blocker_release_installs_and_starts_last(self):
+        self.fx.change('yt-blocker')
+        r = self.run_updater()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.fx.installs, ['yt-blocker'])
+        self.assertEqual(self.fx.loads[-1][1], elf('yt-blocker-new'))
+
+    def test_failed_dns_send_is_not_resent_same_boot(self):
+        self.fx.load_fail = 'nanodns'
+        self.assertNotEqual(self.run_updater().returncode, 0)
+        self.assertEqual(len(self.fx.loads), 1)
+        self.fx.load_fail = None
+        # A lost reply could have delivered the DNS ELF, so do not send it again.
+        self.assertNotEqual(self.run_updater().returncode, 0)
+        self.assertEqual(len(self.fx.loads), 1)
+
+    def test_gap_before_blocker_applies_to_installs_and_launch(self):
+        self.fx.change('hush')
+        self.fx.change('yt-blocker')
+        self.config['sequence'][-2]['delay_ms'] = 90
+        r = self.run_updater()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        times = [e[2] for e in self.fx.events if e[1]=='/repository_install']
+        self.assertEqual(len(times), 2)
+        self.assertGreaterEqual(times[1]-times[0], .085)
+        self.assertGreaterEqual(self.fx.loads[-1][2]-self.fx.loads[-2][2], .085)
+
+    def test_duplicate_imports_reuse_matching_copy(self):
+        old = next(x for x in self.fx.items if x.get('id')=='ftpsrv')
+        old.update(kind='local', filename='ftpsrv-ps5.elf', source_url='')
+        duplicate = dict(old, path=str(self.root / 'ftp-copy.elf'))
+        Path(duplicate['path']).write_bytes(elf('obsolete-copy'))
+        self.fx.items.insert(0,duplicate)
+        self.assertEqual(self.run_updater().returncode, 0)
+        self.assertEqual(self.fx.installs, [])
+        self.assertEqual(self.fx.loads[3][1], elf('ftpsrv-old'))
+
+    def test_one_local_private_build_is_discovered_but_ambiguity_is_skipped(self):
+        self.config['local_kstuff'] = '/data/pldmgr/kstuff.elf'
+        self.fx.items[-1]['filename'] = 'kstuff1.13-fpkg-dr-test8-restmode.elf'
+        self.assertEqual(self.run_updater().returncode, 0)
+        self.assertEqual(self.fx.loads[1][1], elf('private-manual-kstuff'))
+        self.fx.loads.clear()
+        other = self.root / 'other-private.elf'
+        other.write_bytes(elf('another-private-kstuff'))
+        self.fx.items.append(dict(kind='local', slot='local/kstuff-other', path=str(other),
+                                  filename='kstuff1.13-fpkg-dr-test8-rest-fast.elf'))
+        r = self.run_updater(boot='second')
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('Several local kstuff builds', r.stdout)
+        self.assertEqual(len(self.fx.loads), 8)
+
+    def test_legacy_defaults_migrate_without_losing_custom_kstuff_path(self):
+        old = ['nanodns','kstuff-local','elfldr','ftpsrv','websrv',
+               'shadowmountplus','yt-blocker','hush','dump-forge']
+        self.config.update(schema=1, sequence=[dict(id=k, delay_ms=d, enabled=k!='hush')
+                           for k,d in zip(old,[1000]*5+[3000,0,0,0])])
+        result = self.run_updater()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual([Path(x[0]).stem for x in self.fx.loads],
+                         [x.replace('-local','') for x in IDS if x!='hush'])
+
+
 class SourceTests(unittest.TestCase):
-    def test_defaults_preserve_existing_delays(self):
+    def test_default_delays_and_final_blocker(self):
         d = defaults.defaults()
         self.assertEqual([x['id'] for x in d['sequence']], IDS)
-        self.assertEqual([x['delay_ms'] for x in d['sequence']], [1000,1000,1000,1000,1000,3000,0,0,0])
-        self.assertEqual(sum(x['delay_ms'] for x in d['sequence']), 8000)
+        self.assertEqual(IDS, ['nanodns','kstuff-local','elfldr','ftpsrv','websrv',
+                               'shadowmountplus','hush','dump-forge','yt-blocker'])
+        self.assertEqual([x['delay_ms'] for x in d['sequence']], [1000]*7 + [3000,0])
 
-    def test_catalog_contains_exactly_public_set_and_pins(self):
+    def test_catalog_contains_exactly_public_set(self):
         data = json.loads((PM / 'payloads.json').read_text())
         self.assertEqual([x['id'] for x in data['payloads']], PUBLIC)
         self.assertFalse(any('kstuff' in x['url'].lower() for x in data['payloads']))
-        self.assertEqual(next(x['version'] for x in data['payloads'] if x['id']=='yt-blocker'), 'v1.0.2')
+        self.assertEqual(next(x['source'] for x in data['payloads'] if x['id']=='ftpsrv'), 'https://github.com/drakmor/ftpsrv')
         for x in data['payloads']:
             self.assertRegex(x['checksum'], r'^[0-9a-f]{64}$')
             self.assertTrue(x['url'].startswith('https://github.com/'))

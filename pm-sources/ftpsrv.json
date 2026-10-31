@@ -1,17 +1,19 @@
 {
-  "name": "PS5 FTP Server (upstream)",
+  "name": "PS5 FTP Server (Drakmor stable) (upstream)",
   "payloads": [
     {
       "id": "aio-ftpsrv",
-      "name": "FTP Server",
+      "name": "FTP Server (Drakmor stable)",
       "filename": "ftpsrv-ps5.elf",
-      "url": "https://github.com/ps5-payload-dev/ftpsrv/releases/download/v0.21.1/ftpsrv-ps5.elf",
-      "version": "v0.21.1",
-      "last_update": "2026-08-20",
-      "checksum": "7d4b31c83eae4e056580482a3a074e1db25922efc74ac1e439473b45d71a5938",
-      "category": "Networking",
-      "source": "https://github.com/ps5-payload-dev/ftpsrv",
-      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+      "url": "https://github.com/drakmor/ftpsrv/releases/download/1.16-ng-stable/ftpsrv-ps5.elf",
+      "version": "1.16-ng-stable",
+      "checksum": "f19ae469b25453a7a4af4529527521d31f143100f18a2c6839666e7121c8bd32",
+      "last_update": "2026-09-20",
+      "description": "FTP Server (Drakmor stable)",
+      "category": "Vov4k957 Startup",
+      "author": "drakmor",
+      "source": "https://github.com/drakmor/ftpsrv",
+      "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     }
   ]
 }

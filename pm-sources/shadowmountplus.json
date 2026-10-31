@@ -7,11 +7,13 @@
       "filename": "shadowmountplus.elf",
       "url": "https://github.com/drakmor/ShadowMountPlus/releases/download/1.7beta11/shadowmountplus.elf",
       "version": "1.7beta11",
-      "last_update": "2026-10-29",
       "checksum": "08c843018750bef013fe3a4de5f80c5c9738c6c2dafa2406e6b6e68d7585f3da",
-      "category": "Games",
+      "last_update": "2026-10-29",
+      "description": "ShadowMountPlus",
+      "category": "Vov4k957 Startup",
+      "author": "drakmor",
       "source": "https://github.com/drakmor/ShadowMountPlus",
-      "description": "Official public upstream ELF; validate firmware compatibility before updating."
+      "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     }
   ]
 }
