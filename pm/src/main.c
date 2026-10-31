@@ -459,13 +459,15 @@ static int boot_identity(char *out,size_t cap) {
 }
 static int youtube_closed(void) {
 #ifdef PM_HOST_TEST
+    const char *flag=getenv("PM_TEST_YOUTUBE_FLAG");
+    if(flag)return !access(flag,F_OK);
     const char *v=getenv("PM_TEST_YOUTUBE_CLOSED");return !v||!strcmp(v,"1");
 #else
     typedef struct { uint32_t app_id;uint64_t unknown1;char title_id[14];char unknown2[0x3c]; } AppInfo;
     extern int sceKernelGetAppInfo(pid_t,AppInfo*);
     Json j;if(api_json("GET","/processes_list",NULL,cfg.api_ms,&j,NULL))return 0;
     int a=json_get(&j,0,"processes"),safe=1;
-    if(a<0||j.t[a].type!='['){json_free(&j);return 0;}
+    if(a<0||j.t[a].type!='['||!j.t[a].children){json_free(&j);return 0;}
     for(int p=a+1;p<j.t[a].next;p=j.t[p].next){int pid;char name[128];
         if(json_int(&j,json_get(&j,p,"pid"),&pid)||get_string(&j,p,"name",name,sizeof(name))){safe=0;break;}
         AppInfo info={0};
@@ -479,6 +481,42 @@ static void write_status(const char *phase) {
     char path[1024],text[512];if(path_join(path,sizeof(path),"status.json"))return;
     snprintf(text,sizeof(text),"{\"updater_version\":\"%s\",\"phase\":\"%s\",\"updated\":%d,\"problems\":%d}\n",PM_UPDATER_VERSION,phase,updates,problems);
     if(atomic_text(path,text))logmsg("Cannot write status.json");
+}
+/* Persist only an unattempted blocker. Clear the record before dispatch, so
+ * a lost /loadpayload reply can never cause a second application of its patches. */
+static int read_pending_yt(const char *record,const char *boot,char path[512]) {
+    char *text=read_text(record,1024),id[128];
+    int prior_updates,prior_problems;
+    int ok=text && sscanf(text,"%127[^\n]\n%d\n%d\n%511[^\n]",id,&prior_updates,&prior_problems,path)==4
+           && !strcmp(id,boot) && path[0]=='/';
+    if(ok){updates=prior_updates;problems=prior_problems;}
+    free(text);return ok;
+}
+static int deliver_yt(const char *record,const char *boot,const char *path) {
+    if(!youtube_closed()){
+        char text[1024];
+        if(strpbrk(path,"\r\n"))return -1;
+        snprintf(text,sizeof(text),"%s\n%d\n%d\n%s",boot,updates,problems,path);
+        if(atomic_text(record,text))return -1;
+        write_status("waiting_youtube");
+        notify("Close YouTube for YT Blocker. Waiting up to one minute.");
+#ifdef PM_HOST_TEST
+        const int window=180,interval=20;
+#else
+        const int window=60000,interval=2000;
+#endif
+        long long end=clock_ms()+window;
+        for(;;){
+            pause_ms(interval);
+            if(youtube_closed())break;
+            if(clock_ms()>=end){
+                notify("YT Blocker pending. After closing YouTube, run PM AutoUpdate again.");
+                return 1;
+            }
+        }
+    }
+    if(unlink(record) && errno!=ENOENT)return -1;
+    return launch(ids[YT_BLOCKER],path);
 }
 int main(void) {
     signal(SIGPIPE,SIG_IGN);
@@ -497,10 +535,27 @@ int main(void) {
     if(flock(lock,LOCK_EX|LOCK_NB)){close(lock);notify("Another updater is running");return 0;}
     path_join(path,sizeof(path),"fallback");if(mkdir(path,0755)&&errno!=EEXIST){close(lock);return 2;}
     int result=1;Json settings={0},installed_json={0};Installed installed[COUNT]={0};
-    char boot[128],marker[1024];
+    char boot[128],marker[1024],yt_record[1024];
+    if(path_join(yt_record,sizeof(yt_record),"pending-yt.txt"))goto done;
     if(boot_identity(boot,sizeof(boot))||path_join(marker,sizeof(marker),"started-boot.txt")){notify("Cannot identify boot safely; stopped");goto done;}
     text=read_text(marker,256);
-    if(text&&!strcmp(text,boot)){free(text);notify("Payload sequence already started this boot; restart PS5 to run again");result=0;goto done;}free(text);
+    int started=text && !strcmp(text,boot);free(text);
+    if(started){
+        char pending_path[512];
+        if(!read_pending_yt(yt_record,boot,pending_path)){
+            notify("Payload sequence already started this boot");result=0;goto done;
+        }
+        path_join(path,sizeof(path),"last.log");logfile=fopen(path,"a");
+        /* Reopening after Y2JB closes YouTube resumes only the unsent last payload. */
+        int enabled=0;
+        for(int i=0;i<COUNT;i++)if(cfg.steps[i].id==YT_BLOCKER)enabled=cfg.steps[i].enabled;
+        if(!enabled){notify("Pending YT Blocker is disabled in configuration");result=0;goto done;}
+        if(wait_pm(&settings)){notify("PM unavailable; YT Blocker remains pending");result=0;goto done;}
+        int sent=deliver_yt(yt_record,boot,pending_path);
+        if(sent<0){notify("YT Blocker transfer failed or unknown; reboot before retrying");goto done;}
+        if(!sent){write_status("done");notify("YT Blocker sent. Boot sequence complete.");}
+        result=0;goto done;
+    }
     path_join(path,sizeof(path),"last.log");logfile=fopen(path,"w");
     logmsg("PM AutoUpdate %s; native PM API, local-only kstuff",PM_UPDATER_VERSION);
     if(wait_pm(&settings)||api_json("GET","/list_payloads",NULL,cfg.api_ms,&installed_json,NULL)){notify("PM API unavailable; no payloads started");goto done;}
@@ -549,6 +604,7 @@ int main(void) {
     /* Every operation above finishes or selects immutable fallback before this point. */
     if(atomic_text(marker,boot)){notify("Cannot record boot; stopped to prevent repeated kernel payloads");goto done;}
     write_status("launching");
+    int yt_pending=0;
     for(int i=1;i<COUNT;i++){
         Step *s=&cfg.steps[i];if(!s->enabled)continue;
         if(!valid_elf(installed[s->id].path)){
@@ -556,11 +612,15 @@ int main(void) {
             problems++;continue;
         }
         wait_gap(last_launch,cfg.steps[i-1].delay);
-        if(s->id==YT_BLOCKER&&!youtube_closed()){logmsg("YT Blocker skipped: YouTube is running or its closed state cannot be verified");problems++;continue;}
-        if(launch(ids[s->id],installed[s->id].path)){problems++;notify("Payload transfer failed; sequence stopped. Reboot before retrying");goto done;}
+        int sent=s->id==YT_BLOCKER ? deliver_yt(yt_record,boot,installed[s->id].path)
+                                   : launch(ids[s->id],installed[s->id].path);
+        if(sent<0){problems++;notify("Payload transfer failed; sequence stopped. Reboot before retrying");goto done;}
+        if(sent>0){yt_pending=1;continue;}
         last_launch=clock_ms();
     }
-    result=0;write_status("done");
+    result=0;
+    if(yt_pending){write_status("waiting_youtube");goto done;}
+    write_status("done");
     char summary[256];snprintf(summary,sizeof(summary),"Finished: %d updated, %d warning(s). nanoDNS updates apply next boot.",updates,problems);notify(summary);
 done:
     json_free(&settings);json_free(&installed_json);

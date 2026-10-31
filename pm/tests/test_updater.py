@@ -200,11 +200,13 @@ class UpdaterTests(unittest.TestCase):
         self.thread.join()
         self.tmp.cleanup()
 
-    def run_updater(self, *, dns='1', closed='1', text=None, boot='test-boot'):
+    def run_updater(self, *, dns='1', closed='1', text=None, boot='test-boot', youtube_flag=None):
         path = self.root / 'config.json'
         path.write_text(text if text is not None else json.dumps(self.config))
         env = dict(os.environ, PM_CONFIG=str(path), PM_STATE_DIR=str(self.root / 'state'),
                    PM_PORT=str(self.server.server_port), PM_TEST_DNS=dns, PM_TEST_YOUTUBE_CLOSED=closed, PM_TEST_BOOT=boot)
+        if youtube_flag is not None:
+            env["PM_TEST_YOUTUBE_FLAG"] = str(youtube_flag)
         result = subprocess.run([str(self.binary)], env=env, text=True, capture_output=True, timeout=20)
         self.assertNotIn('AddressSanitizer', result.stderr)
         self.assertNotIn('runtime error:', result.stderr)
@@ -335,12 +337,47 @@ class UpdaterTests(unittest.TestCase):
         self.run_updater()
         self.assertEqual(len(self.fx.loads), 2)
 
-    def test_youtube_running_skips_blocker_only(self):
+    def test_youtube_running_defers_then_resumes_only_the_blocker(self):
         r = self.run_updater(closed='0')
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(len(self.fx.loads), 8)
         self.assertFalse(any('yt-blocker' in x[0] for x in self.fx.loads))
         self.assertTrue(any('dump-forge' in x[0] for x in self.fx.loads))
+        self.assertEqual(json.loads((self.root/'state/status.json').read_text())['phase'], 'waiting_youtube')
+        refreshes = sum(e[1]=='/repository_refresh' for e in self.fx.events)
+        self.assertEqual(self.run_updater().returncode, 0)
+        self.assertEqual(len(self.fx.loads), 9)
+        self.assertIn('yt-blocker', self.fx.loads[-1][0])
+        self.assertEqual(refreshes, sum(e[1]=='/repository_refresh' for e in self.fx.events))
+        self.assertEqual(self.run_updater().returncode, 0)
+        self.assertEqual(len(self.fx.loads), 9)
+
+    def test_blocker_starts_if_youtube_closes_during_wait(self):
+        flag = self.root/'youtube-closed'
+        def close_youtube():
+            end = time.monotonic() + 4
+            while time.monotonic()<end:
+                if (self.root/'state/pending-yt.txt').exists():
+                    flag.touch()
+                    return
+                time.sleep(.005)
+        thread = threading.Thread(target=close_youtube)
+        thread.start()
+        r = self.run_updater(youtube_flag=flag)
+        thread.join()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(len(self.fx.loads), 9)
+        self.assertIn('yt-blocker', self.fx.loads[-1][0])
+        self.assertFalse((self.root/'state/pending-yt.txt').exists())
+
+    def test_lost_blocker_reply_is_not_retried(self):
+        self.assertEqual(self.run_updater(closed='0').returncode, 0)
+        self.fx.load_fail='yt-blocker'
+        self.assertNotEqual(self.run_updater().returncode, 0)
+        self.fx.load_fail=None
+        self.run_updater()
+        self.assertEqual(len(self.fx.loads), 9)
+
 
     def test_configured_delays_are_observed(self):
         self.config['sequence'][5]['delay_ms'] = 65

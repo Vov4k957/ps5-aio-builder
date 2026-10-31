@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '1.1.0'
+VERSION = '1.1.1'
 IDS = ['nanodns', 'kstuff-local', 'elfldr', 'ftpsrv', 'websrv',
        'shadowmountplus', 'hush', 'dump-forge', 'yt-blocker']
 SOURCE = 'https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/payloads.json'
