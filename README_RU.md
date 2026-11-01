@@ -24,9 +24,9 @@
 
 | Профиль | Состав |
 |---|---|
-| `standard` | Публичный kstuff от EchoStretch, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus, **YT Blocker v1.0.2, Hush, Dump Forge** |
-| `afterdns` | 8 нагрузок после уже запущенного nanoDNS — без повторного запуска DNS |
-| `afterdns-fpkg13` | Локальный test8 + остальные 7 нагрузок, после отдельно запущенного nanoDNS; только ручная сборка |
+| `standard` | Публичный kstuff от EchoStretch, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus, **Hush, Dump Forge** |
+| `afterdns` | 7 нагрузок после уже запущенного nanoDNS — без повторного запуска DNS |
+| `afterdns-fpkg13` | Локальный test8 + остальные 6 нагрузок, после отдельно запущенного nanoDNS; только ручная сборка |
 | `extended` | Старый расширенный профиль: kstuff, elfldr, ftpsrv, nanoDNS, websrv, ShadowMountPlus, klogsrv, Dump Forge |
 | `zftpd` | Старый альтернативный FTP-профиль: kstuff, elfldr, zftpd, nanoDNS, websrv, ShadowMountPlus |
 | `fpkg13` | Как новый standard, но с твоим локальным `kstuff1.13-fpkg-dr-test8-rest-fast.elf` вместо публичного kstuff |
@@ -54,11 +54,7 @@ python3 scripts/build.py --profile fpkg13
 
 ## Порядок и задержки в standard и fpkg13
 
-Первые шесть нагрузок идут как в исходном AIO, с паузами 1000 мс; **после ShadowMountPlus — пауза 3000 мс**, далее **YT Blocker v1.0.2 → Hush → Dump Forge**, без дополнительных пауз (0 мс). Пауза устанавливается после отправки ELF загрузчику, а не после подтверждения запуска предыдущей нагрузки. Чтобы не менять время в других профилях, используются `profile_delays` в `config/payloads.json`.
-
-YT Blocker закреплён за **v1.0.2**, поскольку запрошена именно эта версия (`release_tag`). Hush и Dump Forge получают наиболее свежий доступный GitHub-релиз.
-
-**Предупреждение:** автор YT Blocker требует закрыть YouTube и сохранить копии системных баз/метаданных перед применением. Если AIO запускается непосредственно через Y2JB внутри открытого YouTube, эта последовательность не проверена на безопасность и может повредить настройку YouTube. Не использовать автоматически без проверки условий запуска.
+Порядок: **kstuff → elfldr → ftpsrv → nanoDNS → websrv → ShadowMountPlus → Hush → Dump Forge**. Между нагрузками 1000 мс; пауза отсчитывается после отправки ELF загрузчику. Hush и Dump Forge получают наиболее свежий доступный GitHub-релиз. YT Blocker удалён из всех профилей и из PM AutoUpdate.
 
 **Примечание к запуску nanoDNS первым:** эта программа вызывает `kernel_set_ucred_authid` при старте. Успешный запуск до kstuff на Y2JB/PS5 13.60 ещё надо подтвердить на реальной консоли. Также сторонние PS5-проекты сообщали о проблемах HTTPS в `sceHttp2`; поэтому HTTPS-проверка GitHub и откат должны быть испытаны отдельно. Совместимость одного вызова на 9021 не доказывает работу сетевого обновлятора.
 

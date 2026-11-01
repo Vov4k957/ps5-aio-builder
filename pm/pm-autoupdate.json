@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "source_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/payloads.json",
   "auto_update": true,
   "bootstrap_nanodns": "/data/pldmgr/nanodns.elf",
@@ -49,11 +49,6 @@
     },
     {
       "id": "dump-forge",
-      "delay_ms": 3000,
-      "enabled": true
-    },
-    {
-      "id": "yt-blocker",
       "delay_ms": 0,
       "enabled": true
     }

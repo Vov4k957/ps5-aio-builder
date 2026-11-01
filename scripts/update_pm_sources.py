@@ -12,6 +12,9 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'pm-sources')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    # Keep the former subscription valid but empty, so refresh cannot restore it.
+    (args.output / 'yt-blocker.json').write_text(
+        json.dumps({'name': 'Removed source', 'payloads': []}, indent=2) + '\n')
     for item in json.loads((ROOT / 'pm/payloads.json').read_text())['payloads']:
         # Existing PM slots use these IDs; keep subscriptions and favorites valid.
         catalog = {'name': f"PS5 {item['name']} (upstream)",

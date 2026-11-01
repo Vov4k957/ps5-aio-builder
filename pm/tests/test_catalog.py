@@ -21,14 +21,15 @@ class CatalogTests(unittest.TestCase):
     def setUp(self):
         self.config = json.loads((PM.parent / 'config/payloads.json').read_text())
 
-    def test_future_blocker_is_picked_while_legacy_aio_remains_pinned(self):
-        cfg = catalog.pm_source('yt-blocker', self.config)
-        self.assertNotIn('release_tag', cfg)
-        self.assertEqual(self.config['payloads']['yt-blocker']['release_tag'], 'v1.0.2')
-        releases = [release(cfg['repo'], 'v1.1.0', 'YT-Blocker_v1.1.0.elf', '2026-10-21'),
-                    release(cfg['repo'], 'v1.0.2', 'YT-Blocker_v1.0.2.elf', '2026-10-18')]
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(catalog.entry('yt-blocker', cfg, releases, Path(tmp))['version'], 'v1.1.0')
+    def test_retired_payload_is_absent_from_all_catalogs_and_profiles(self):
+        self.assertNotIn('yt-blocker', catalog.PUBLIC_IDS)
+        self.assertNotIn('yt-blocker', self.config['payloads'])
+        for profile in self.config['profiles'].values():
+            self.assertNotIn('yt-blocker', profile)
+        retired_source = json.loads((PM.parent/'pm-sources/yt-blocker.json').read_text())
+        self.assertEqual(retired_source['payloads'], [])
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValueError):
+            catalog.entry('yt-blocker', {'kind': 'github'}, [], Path(tmp))
 
     def test_drakmor_stable_and_ps5_asset_only(self):
         cfg = catalog.pm_source('ftpsrv', self.config)

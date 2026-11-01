@@ -15,7 +15,7 @@ spec = importlib.util.spec_from_file_location('aio_builder', ROOT / 'scripts/bui
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 PUBLIC_IDS = ('nanodns', 'elfldr', 'ftpsrv', 'websrv', 'shadowmountplus',
-              'hush', 'dump-forge', 'yt-blocker')
+              'hush', 'dump-forge')
 
 
 def pm_source(key, config):
@@ -23,16 +23,12 @@ def pm_source(key, config):
     if key == 'ftpsrv':
         cfg.update(repo='drakmor/ftpsrv', name='FTP Server (Drakmor stable)',
                    include_prerelease=False)
-    elif key == 'yt-blocker':
-        cfg.pop('release_tag', None)
-        cfg.update(name='YT Blocker', asset_regex=r'(?i)^YT[-_]Blocker(?:[_-]v?[0-9][0-9a-z._-]*)?\.elf$',
-                   include_prerelease=True)
     return cfg
 
 
 def entry(key, cfg, releases, cache):
     if key not in PUBLIC_IDS or 'kstuff' in key.lower() or cfg.get('kind') != 'github':
-        raise ValueError('Only the eight selected public payloads may enter this catalog')
+        raise ValueError('Only the seven selected public payloads may enter this catalog')
     if key == 'ftpsrv':
         # Drakmor also publishes test/beta builds without GitHub's prerelease flag.
         releases = [r for r in releases if re.search(r'(?:^|[-._])stable$', r['tag_name'], re.I)]

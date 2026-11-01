@@ -11,21 +11,19 @@ class BuildTests(unittest.TestCase):
     def test_profiles_and_sources(self):
         cfg = json.loads((build.ROOT / "config/payloads.json").read_text())
         build.validate_config(cfg)
-        self.assertEqual(len(cfg["profiles"]["standard"]), 9)
-        self.assertEqual(len(cfg["profiles"]["afterdns"]), 8)
+        self.assertEqual(len(cfg["profiles"]["standard"]), 8)
+        self.assertEqual(len(cfg["profiles"]["afterdns"]), 7)
         self.assertNotIn("nanodns", cfg["profiles"]["afterdns"])
         self.assertNotIn("nanodns", cfg["profiles"]["afterdns-fpkg13"])
-        self.assertEqual(cfg["profiles"]["afterdns"][-3:], ["yt-blocker", "hush", "dump-forge"])
-        self.assertEqual(build.effective_payload_config(cfg, "afterdns", "shadowmountplus")["delay_ms"], 3000)
-        self.assertEqual(build.effective_payload_config(cfg, "afterdns-fpkg13", "shadowmountplus")["delay_ms"], 3000)
-        self.assertEqual(cfg["profiles"]["standard"][-3:], ["yt-blocker", "hush", "dump-forge"])
-        self.assertEqual(cfg["payloads"]["yt-blocker"]["release_tag"], "v1.0.2")
-        self.assertEqual(build.effective_payload_config(cfg, "standard", "shadowmountplus")["delay_ms"], 3000)
-        self.assertEqual(build.effective_payload_config(cfg, "standard", "yt-blocker")["delay_ms"], 0)
-        self.assertEqual(build.effective_payload_config(cfg, "standard", "hush")["delay_ms"], 0)
+        self.assertEqual(cfg["profiles"]["afterdns"][-2:], ["hush", "dump-forge"])
+        self.assertEqual(build.effective_payload_config(cfg, "afterdns", "shadowmountplus")["delay_ms"], 1000)
+        self.assertEqual(build.effective_payload_config(cfg, "afterdns-fpkg13", "shadowmountplus")["delay_ms"], 1000)
+        self.assertEqual(cfg["profiles"]["standard"][-2:], ["hush", "dump-forge"])
+        self.assertEqual(build.effective_payload_config(cfg, "standard", "shadowmountplus")["delay_ms"], 1000)
+        self.assertEqual(build.effective_payload_config(cfg, "standard", "hush")["delay_ms"], 1000)
         self.assertEqual(build.effective_payload_config(cfg, "standard", "dump-forge")["delay_ms"], 0)
         self.assertEqual(build.effective_payload_config(cfg, "extended", "shadowmountplus")["delay_ms"], 1000)
-        self.assertEqual(build.effective_payload_config(cfg, "fpkg13", "shadowmountplus")["delay_ms"], 3000)
+        self.assertEqual(build.effective_payload_config(cfg, "fpkg13", "shadowmountplus")["delay_ms"], 1000)
         self.assertEqual(cfg["profiles"]["fpkg13"][0], "kstuff-fpkg-manual")
         manual = cfg["payloads"]["kstuff-fpkg-manual"]
         self.assertEqual(manual["manual_filename"], "kstuff1.13-fpkg-dr-test8-rest-fast.elf")
@@ -35,11 +33,11 @@ class BuildTests(unittest.TestCase):
         from unittest.mock import patch
         with patch.object(build, "api_json", return_value={
                 "tag_name": "v1.0.2", "draft": False,
-                "assets": [{"name": "YT-Blocker_v1.0.2.elf"}]}) as mock_api:
-            releases = build.release_assets("Epinorr/y2jb-update-blocker", None, tag="v1.0.2")
-            release, asset = build.select_asset(releases, r"^YT-Blocker_v1\.0\.2\.elf$")
+                "assets": [{"name": "app-v1.0.2.elf"}]}) as mock_api:
+            releases = build.release_assets("example/app", None, tag="v1.0.2")
+            release, asset = build.select_asset(releases, r"^app-v1\.0\.2\.elf$")
             self.assertEqual(release["tag_name"], "v1.0.2")
-            self.assertEqual(asset["name"], "YT-Blocker_v1.0.2.elf")
+            self.assertEqual(asset["name"], "app-v1.0.2.elf")
             self.assertTrue(mock_api.call_args.args[0].endswith("/releases/tags/v1.0.2"))
 
     def test_bad_delay_override_rejected(self):

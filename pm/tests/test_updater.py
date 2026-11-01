@@ -55,9 +55,9 @@ class Fixture:
             checksum = hashlib.sha256(data).hexdigest()
             self.items.append({'id': key, 'kind': 'repo', 'slot': 'repo/' + key + '@test',
                                'path': str(path), 'filename': path.name,
-                               'source_url': self.source, 'version': 'v1.0.2' if key == 'yt-blocker' else '1',
+                               'source_url': self.source, 'version': '1',
                                'checksum': checksum})
-            self.available.append({'id': key, 'version': 'v1.0.2' if key == 'yt-blocker' else '1',
+            self.available.append({'id': key, 'version': '1',
                                    'checksum': checksum, 'url': 'https://github.com/example/project/releases/download/v1/' + key + '.elf'})
         self.kstuff = root / 'kstuff.elf'
         self.kstuff.write_bytes(elf('private-manual-kstuff'))
@@ -65,7 +65,7 @@ class Fixture:
 
     def change(self, key):
         item = next(x for x in self.available if x['id'] == key)
-        item['version'] = 'v1.1.0' if key == 'yt-blocker' else '2'
+        item['version'] = '2'
         self.release_bytes[key] = elf(key + '-new')
         item['checksum'] = hashlib.sha256(elf(key + '-new')).hexdigest()
 
@@ -200,13 +200,11 @@ class UpdaterTests(unittest.TestCase):
         self.thread.join()
         self.tmp.cleanup()
 
-    def run_updater(self, *, dns='1', closed='1', text=None, boot='test-boot', youtube_flag=None):
+    def run_updater(self, *, dns='1', text=None, boot='test-boot'):
         path = self.root / 'config.json'
         path.write_text(text if text is not None else json.dumps(self.config))
         env = dict(os.environ, PM_CONFIG=str(path), PM_STATE_DIR=str(self.root / 'state'),
-                   PM_PORT=str(self.server.server_port), PM_TEST_DNS=dns, PM_TEST_YOUTUBE_CLOSED=closed, PM_TEST_BOOT=boot)
-        if youtube_flag is not None:
-            env["PM_TEST_YOUTUBE_FLAG"] = str(youtube_flag)
+                   PM_PORT=str(self.server.server_port), PM_TEST_DNS=dns, PM_TEST_BOOT=boot)
         result = subprocess.run([str(self.binary)], env=env, text=True, capture_output=True, timeout=20)
         self.assertNotIn('AddressSanitizer', result.stderr)
         self.assertNotIn('runtime error:', result.stderr)
@@ -237,7 +235,7 @@ class UpdaterTests(unittest.TestCase):
         r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(self.fx.installs, PUBLIC)
-        self.assertEqual(len(self.fx.loads), 9)
+        self.assertEqual(len(self.fx.loads), 8)
         self.assertIn(b'nanodns-old', self.fx.loads[0][1])
         self.assertIn(b'nanodns-new', (self.root / 'nanodns.elf').read_bytes())
 
@@ -252,7 +250,7 @@ class UpdaterTests(unittest.TestCase):
     def test_no_dns_uses_local_and_never_calls_remote_routes(self):
         r = self.run_updater(dns='0')
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(self.fx.loads), 9)
+        self.assertEqual(len(self.fx.loads), 8)
         self.assertFalse(any(e[1].startswith('/repository') or e[1] == '/sources_add' for e in self.fx.events))
 
     def test_refresh_failures_keep_local(self):
@@ -266,7 +264,7 @@ class UpdaterTests(unittest.TestCase):
                 r = self.run_updater(boot=mode)
                 self.assertEqual(r.returncode, 0, r.stdout)
                 self.assertEqual(self.fx.installs, [])
-                self.assertEqual(len(self.fx.loads), 9)
+                self.assertEqual(len(self.fx.loads), 8)
 
     def test_rejected_install_uses_old_copy(self):
         self.fx.change('websrv')
@@ -301,9 +299,9 @@ class UpdaterTests(unittest.TestCase):
         r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(self.fx.installs, [x for x in PUBLIC if x != 'nanodns'])
-        self.assertEqual(len(self.fx.loads), 9)
+        self.assertEqual(len(self.fx.loads), 8)
 
-    def test_missing_manual_kstuff_still_launches_all_eight(self):
+    def test_missing_manual_kstuff_still_launches_all_seven(self):
         self.fx.kstuff.unlink()
         r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -315,13 +313,13 @@ class UpdaterTests(unittest.TestCase):
         next(Path(x['path']) for x in self.fx.items if x.get('id') == 'websrv').unlink()
         r = self.run_updater(dns='0')
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(self.fx.loads), 8)
+        self.assertEqual(len(self.fx.loads), 7)
         self.assertFalse(any('websrv' in x[0] for x in self.fx.loads))
 
     def test_does_not_repeat_sequence_same_boot(self):
         self.assertEqual(self.run_updater().returncode, 0)
         self.assertEqual(self.run_updater().returncode, 0)
-        self.assertEqual(len(self.fx.loads), 9)
+        self.assertEqual(len(self.fx.loads), 8)
 
     def test_extra_autoload_entry_rejected(self):
         self.fx.autoload += ',local/allinOne-full'
@@ -337,47 +335,36 @@ class UpdaterTests(unittest.TestCase):
         self.run_updater()
         self.assertEqual(len(self.fx.loads), 2)
 
-    def test_youtube_running_defers_then_resumes_only_the_blocker(self):
-        r = self.run_updater(closed='0')
+    def test_retired_blocker_in_old_config_and_cached_catalog_is_ignored(self):
+        retired = self.root / 'YT-Blocker_v1.0.2.elf'
+        retired.write_bytes(elf('retired-blocker'))
+        self.fx.items.append(dict(id='yt-blocker', kind='repo', slot='repo/yt-blocker@test',
+                                  path=str(retired), filename=retired.name, source_url=self.fx.source,
+                                  version='1', checksum=hashlib.sha256(retired.read_bytes()).hexdigest()))
+        self.fx.available.append(dict(id='yt-blocker', version='999', checksum='a'*64,
+                                      url='https://github.com/example/removed/releases/download/999/retired.elf'))
+        self.config.update(schema=2)
+        self.config['sequence'].append(dict(id='yt-blocker', delay_ms=0, enabled=True))
+        self.fx.change('hush')
+        r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(self.fx.loads), 8)
-        self.assertFalse(any('yt-blocker' in x[0] for x in self.fx.loads))
-        self.assertTrue(any('dump-forge' in x[0] for x in self.fx.loads))
-        self.assertEqual(json.loads((self.root/'state/status.json').read_text())['phase'], 'waiting_youtube')
-        refreshes = sum(e[1]=='/repository_refresh' for e in self.fx.events)
-        self.assertEqual(self.run_updater().returncode, 0)
-        self.assertEqual(len(self.fx.loads), 9)
-        self.assertIn('yt-blocker', self.fx.loads[-1][0])
-        self.assertEqual(refreshes, sum(e[1]=='/repository_refresh' for e in self.fx.events))
-        self.assertEqual(self.run_updater().returncode, 0)
-        self.assertEqual(len(self.fx.loads), 9)
+        self.assertEqual(self.fx.installs, ['hush'])
+        self.assertEqual([Path(x[0]).stem for x in self.fx.loads], [x.replace('-local', '') for x in IDS])
+        self.assertFalse(any(e[1] == '/processes_list' for e in self.fx.events))
+        self.assertEqual(json.loads((self.root/'state/status.json').read_text())['phase'], 'done')
 
-    def test_blocker_starts_if_youtube_closes_during_wait(self):
-        flag = self.root/'youtube-closed'
-        def close_youtube():
-            end = time.monotonic() + 4
-            while time.monotonic()<end:
-                if (self.root/'state/pending-yt.txt').exists():
-                    flag.touch()
-                    return
-                time.sleep(.005)
-        thread = threading.Thread(target=close_youtube)
-        thread.start()
-        r = self.run_updater(youtube_flag=flag)
-        thread.join()
+    def test_legacy_pending_blocker_is_discarded_without_resuming(self):
+        state = self.root / 'state'
+        state.mkdir()
+        (state/'started-boot.txt').write_text('test-boot')
+        retired = self.root / 'YT-Blocker_v1.0.2.elf'
+        retired.write_bytes(elf('retired-blocker'))
+        (state/'pending-yt.txt').write_text(f'test-boot\n0\n0\n{retired}')
+        r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(self.fx.loads), 9)
-        self.assertIn('yt-blocker', self.fx.loads[-1][0])
-        self.assertFalse((self.root/'state/pending-yt.txt').exists())
-
-    def test_lost_blocker_reply_is_not_retried(self):
-        self.assertEqual(self.run_updater(closed='0').returncode, 0)
-        self.fx.load_fail='yt-blocker'
-        self.assertNotEqual(self.run_updater().returncode, 0)
-        self.fx.load_fail=None
-        self.run_updater()
-        self.assertEqual(len(self.fx.loads), 9)
-
+        self.assertEqual(self.fx.events, [])
+        self.assertFalse((state/'pending-yt.txt').exists())
+        self.assertEqual(json.loads((state/'status.json').read_text())['phase'], 'already_started')
 
     def test_configured_delays_are_observed(self):
         self.config['sequence'][5]['delay_ms'] = 65
@@ -386,7 +373,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_invalid_config_does_nothing(self):
         for text in ['{', '{"schema":01}', '{"schema":1,"source_url":"\\u0000"}',
-                     json.dumps(self.config).replace('"schema": 2', '"schema": 2, "schema": 2'),
+                     json.dumps(self.config).replace('"schema": 3', '"schema": 3, "schema": 3'),
                      json.dumps(self.config).replace('"delay_ms": 0', '"delay_ms": -1', 1)]:
             with self.subTest(text=text[:80]):
                 r = self.run_updater(text=text)
@@ -395,11 +382,11 @@ class UpdaterTests(unittest.TestCase):
 
     def test_disabled_payload_is_neither_updated_nor_launched(self):
         self.config['sequence'][-1]['enabled'] = False
-        self.fx.change('yt-blocker')
+        self.fx.change('dump-forge')
         r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertNotIn('yt-blocker', self.fx.installs)
-        self.assertFalse(any('yt-blocker' in x[0] for x in self.fx.loads))
+        self.assertNotIn('dump-forge', self.fx.installs)
+        self.assertFalse(any('dump-forge' in x[0] for x in self.fx.loads))
 
     def test_catalog_without_hash_does_not_install(self):
         self.fx.available[0]['checksum'] = ''
@@ -414,7 +401,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.fx.installs, [])
         self.assertIn(b'private-manual-kstuff', self.fx.loads[1][1])
 
-    def test_empty_install_bootstraps_dns_then_builds_eight_slots(self):
+    def test_empty_install_bootstraps_dns_then_builds_seven_slots(self):
         for item in self.fx.items:
             Path(item['path']).unlink()
         self.fx.items.clear()
@@ -423,7 +410,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.fx.loads[0][1], elf('bundled-nanodns'))
         self.assertEqual(self.fx.installs, PUBLIC)
-        self.assertEqual(len(self.fx.loads), 8)
+        self.assertEqual(len(self.fx.loads), 7)
         dns_load = next(i for i,e in enumerate(self.fx.events) if '/loadpayload:' in e[1])
         add = next(i for i,e in enumerate(self.fx.events) if e[1]=='/sources_add')
         self.assertLess(dns_load, add)
@@ -459,12 +446,12 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.fx.installs, ['ftpsrv'])
         self.assertEqual(self.fx.loads[3][1], elf('ftpsrv-old'))
 
-    def test_new_blocker_release_installs_and_starts_last(self):
-        self.fx.change('yt-blocker')
+    def test_new_dump_forge_release_installs_and_starts_last(self):
+        self.fx.change('dump-forge')
         r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.fx.installs, ['yt-blocker'])
-        self.assertEqual(self.fx.loads[-1][1], elf('yt-blocker-new'))
+        self.assertEqual(self.fx.installs, ['dump-forge'])
+        self.assertEqual(self.fx.loads[-1][1], elf('dump-forge-new'))
 
     def test_failed_dns_send_is_not_resent_same_boot(self):
         self.fx.load_fail = 'nanodns'
@@ -475,9 +462,9 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotEqual(self.run_updater().returncode, 0)
         self.assertEqual(len(self.fx.loads), 1)
 
-    def test_gap_before_blocker_applies_to_installs_and_launch(self):
+    def test_gap_before_last_payload_applies_to_installs_and_launch(self):
         self.fx.change('hush')
-        self.fx.change('yt-blocker')
+        self.fx.change('dump-forge')
         self.config['sequence'][-2]['delay_ms'] = 90
         r = self.run_updater()
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -509,7 +496,7 @@ class UpdaterTests(unittest.TestCase):
         r = self.run_updater(boot='second')
         self.assertEqual(r.returncode, 0)
         self.assertIn('Several local kstuff builds', r.stdout)
-        self.assertEqual(len(self.fx.loads), 8)
+        self.assertEqual(len(self.fx.loads), 7)
 
     def test_legacy_defaults_migrate_without_losing_custom_kstuff_path(self):
         old = ['nanodns','kstuff-local','elfldr','ftpsrv','websrv',
@@ -521,14 +508,43 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual([Path(x[0]).stem for x in self.fx.loads],
                          [x.replace('-local','') for x in IDS if x!='hush'])
 
+    def test_v2_defaults_migrate_and_keep_opt_out(self):
+        self.config.update(schema=2)
+        self.config['sequence'] = [dict(id=k, delay_ms=d, enabled=k!='hush')
+                                  for k,d in zip(IDS + ['yt-blocker'], [1000]*7 + [3000,0])]
+        result = self.run_updater()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual([Path(x[0]).stem for x in self.fx.loads],
+                         [x.replace('-local','') for x in IDS if x!='hush'])
+
+    def test_legacy_custom_order_is_preserved_except_retired_entry(self):
+        self.config['schema'] = 2
+        self.config['sequence'][-2:] = self.config['sequence'][-2:][::-1]
+        self.config['sequence'].insert(3, dict(id='yt-blocker', delay_ms=0, enabled=True))
+        result = self.run_updater()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual([Path(x[0]).stem for x in self.fx.loads],
+                         [x.replace('-local','') for x in IDS[:-2] + ['dump-forge','hush']])
+
+    def test_retired_entry_does_not_hide_missing_or_duplicate_active_payloads(self):
+        original = copy.deepcopy(self.config['sequence'])
+        cases = [original[:-1] + [dict(id='yt-blocker', delay_ms=0, enabled=True)],
+                 original[:-1] + [original[2]],
+                 original + [dict(id='unknown-payload', delay_ms=0, enabled=True)]]
+        for steps in cases:
+            with self.subTest(steps=steps):
+                self.config.update(schema=2, sequence=steps)
+                self.assertNotEqual(self.run_updater().returncode, 0)
+        self.assertEqual(self.fx.events, [])
+
 
 class SourceTests(unittest.TestCase):
-    def test_default_delays_and_final_blocker(self):
+    def test_default_delays_and_final_dump_forge(self):
         d = defaults.defaults()
         self.assertEqual([x['id'] for x in d['sequence']], IDS)
         self.assertEqual(IDS, ['nanodns','kstuff-local','elfldr','ftpsrv','websrv',
-                               'shadowmountplus','hush','dump-forge','yt-blocker'])
-        self.assertEqual([x['delay_ms'] for x in d['sequence']], [1000]*7 + [3000,0])
+                               'shadowmountplus','hush','dump-forge'])
+        self.assertEqual([x['delay_ms'] for x in d['sequence']], [1000]*7 + [0])
 
     def test_catalog_contains_exactly_public_set(self):
         data = json.loads((PM / 'payloads.json').read_text())

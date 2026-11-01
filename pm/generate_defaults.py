@@ -4,15 +4,15 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '1.1.1'
+VERSION = '1.2.0'
 IDS = ['nanodns', 'kstuff-local', 'elfldr', 'ftpsrv', 'websrv',
-       'shadowmountplus', 'hush', 'dump-forge', 'yt-blocker']
+       'shadowmountplus', 'hush', 'dump-forge']
 SOURCE = 'https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/payloads.json'
 
 
 def defaults():
     return {
-        'schema': 2, 'source_url': SOURCE, 'auto_update': True,
+        'schema': 3, 'source_url': SOURCE, 'auto_update': True,
         'bootstrap_nanodns': '/data/pldmgr/nanodns.elf',
         'local_kstuff': '/data/pldmgr/kstuff.elf',
         'pm_ready_timeout_ms': 15000, 'api_timeout_ms': 5000,
@@ -20,7 +20,7 @@ def defaults():
         'install_timeout_ms': 200000, 'update_budget_ms': 900000,
         'launch_timeout_ms': 40000,
         'sequence': [{'id': key, 'delay_ms': delay, 'enabled': True}
-                     for key, delay in zip(IDS, [1000] * 7 + [3000, 0])],
+                     for key, delay in zip(IDS, [1000] * 7 + [0])],
     }
 
 

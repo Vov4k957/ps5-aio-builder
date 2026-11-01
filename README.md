@@ -17,11 +17,9 @@ Configurable PS5 all-in-one ELF builder that bundles selected release ELF files 
 - GitHub Actions can run public-source AIO profiles manually; resulting build artifacts are **not private** in this public repository. The former nightly AIO build is disabled; the separate PM catalog refreshes every 10 minutes without rebuilding the coordinator.
 - Discord-only/manual ELF files are **local-only**. Never upload restricted binaries to this public repository or its workflow artifacts.
 
-## Standard/fpkg13 payload order (9 payloads)
+## Standard/fpkg13 payload order (8 payloads)
 
-`kstuff → elfldr → ftpsrv → nanoDNS → websrv → ShadowMountPlus → [3000 ms] → YT Blocker v1.0.2 → [0 ms] → Hush → [0 ms] → Dump Forge`. Earlier gaps remain 1000 ms. Delays are applied **after transmission**, not after process initialization. The 3-second delay only affects standard/fpkg13 through `profile_delays`; other profiles are unchanged. YT Blocker is pinned to exactly v1.0.2; Hush and Dump Forge track latest releases.
-
-**CAUTION:** YT Blocker's maintainer explicitly says to **close YouTube before running**, since it modifies system databases and application metadata. Loading this AIO through Y2JB while YouTube is still running may conflict with those requirements. Back up metadata, and do not enable this profile for automatic console startup before testing safe sequencing.
+`kstuff → elfldr → ftpsrv → nanoDNS → websrv → ShadowMountPlus → Hush → Dump Forge`. Gaps are 1000 ms after transmission, not after process initialization. Hush and Dump Forge track latest releases. YT Blocker has been removed from all profiles and from PM AutoUpdate.
 
 ## Start a cloud build
 
@@ -40,7 +38,7 @@ python3 scripts/build.py --profile fpkg13
 
 The `fpkg13` profile enforces the supplied ELF's exact SHA-256 and expects `manual/kstuff1.13-fpkg-dr-test8-rest-fast.elf` and intentionally fails if it is absent; it never substitutes a different kstuff version.
 
-The `afterdns` profile holds eight post-DNS payloads without re-launching nanoDNS; it is a legacy AIO profile, **not** the PM AutoUpdate coordinator. The new coordinator uses separate ELF files and does not need an afterdns build. `afterdns-fpkg13` still requires the local private test8 ELF and cannot be built by the public cloud workflow.
+The `afterdns` profile holds seven post-DNS payloads without re-launching nanoDNS; it is a legacy AIO profile, **not** the PM AutoUpdate coordinator. The new coordinator uses separate ELF files and does not need an afterdns build. `afterdns-fpkg13` still requires the local private test8 ELF and cannot be built by the public cloud workflow.
 
 ## Notes
 

@@ -29,11 +29,11 @@
 #include <sys/sysctl.h>
 #endif
 
-enum { NANODNS, KSTUFF, ELFLDR, FTPSRV, WEBSRV, SHADOWMOUNT, YT_BLOCKER, HUSH, DUMP_FORGE, COUNT };
+enum { NANODNS, KSTUFF, ELFLDR, FTPSRV, WEBSRV, SHADOWMOUNT, HUSH, DUMP_FORGE, COUNT };
 extern const unsigned char pm_dns_seed[], pm_dns_seed_end[];
 #define FILE_LIMIT (512LL*1024*1024)
-static const char *ids[COUNT]={"nanodns","kstuff-local","elfldr","ftpsrv","websrv","shadowmountplus","yt-blocker","hush","dump-forge"};
-static const char *basenames[COUNT]={"nanodns.elf","kstuff.elf","elfldr-ps5.elf","ftpsrv-ps5.elf","websrv-ps5.elf","shadowmountplus.elf","YT-Blocker_v1.0.2.elf","hush.elf",""};
+static const char *ids[COUNT]={"nanodns","kstuff-local","elfldr","ftpsrv","websrv","shadowmountplus","hush","dump-forge"};
+static const char *basenames[COUNT]={"nanodns.elf","kstuff.elf","elfldr-ps5.elf","ftpsrv-ps5.elf","websrv-ps5.elf","shadowmountplus.elf","hush.elf",""};
 typedef struct { int id,delay,enabled; } Step;
 typedef struct {
     char source[1024],dns[512],kstuff[512];
@@ -131,24 +131,25 @@ static int get_string(const Json *j,int obj,const char *key,char *out,size_t cap
     return json_string(j,json_get(j,obj,key),out,cap);
 }
 static int id_index(const char *id) {for(int i=0;i<COUNT;i++)if(!strcmp(id,ids[i]))return i;return -1;}
-/* Upgrade precisely the old shipped order. Keep custom paths, opt-outs and
- * deliberately edited sequences. Do not rewrite the user's file. */
-static void migrate_v1(void) {
-    static const int old_delays[COUNT]={1000,1000,1000,1000,1000,3000,0,0,0};
+/* The retired entry has already been removed. Upgrade only shipped delays;
+ * preserve custom paths, opt-outs and edited order without rewriting the file. */
+static void migrate_legacy(int schema) {
+    static const int old_delays[2][COUNT]={
+        {1000,1000,1000,1000,1000,3000,0,0},
+        {1000,1000,1000,1000,1000,1000,1000,3000}
+    };
     for(int i=0;i<COUNT;i++)
-        if(cfg.steps[i].id!=i || cfg.steps[i].delay!=old_delays[i])return;
-    Step yt=cfg.steps[YT_BLOCKER];
-    cfg.steps[6]=cfg.steps[7];
-    cfg.steps[7]=cfg.steps[8];
-    cfg.steps[8]=yt;
-    for(int i=0;i<COUNT;i++) cfg.steps[i].delay=i<7?1000:(i==7?3000:0);
-    if(cfg.refresh_ms==10000)cfg.refresh_ms=120000;
-    if(cfg.budget_ms==300000)cfg.budget_ms=900000;
+        if(cfg.steps[i].id!=i || cfg.steps[i].delay!=old_delays[schema-1][i])return;
+    for(int i=0;i<COUNT;i++)cfg.steps[i].delay=i<COUNT-1?1000:0;
+    if(schema==1){
+        if(cfg.refresh_ms==10000)cfg.refresh_ms=120000;
+        if(cfg.budget_ms==300000)cfg.budget_ms=900000;
+    }
 }
 static int parse_config(char *text) {
     Json j;if(json_parse(&j,text))return -1;
     int schema,rc=-1;
-    if(json_int(&j,json_get(&j,0,"schema"),&schema)||(schema!=1&&schema!=2)||
+    if(json_int(&j,json_get(&j,0,"schema"),&schema)||schema<1||schema>3||
        get_string(&j,0,"source_url",cfg.source,sizeof(cfg.source))||
        strncmp(cfg.source,"https://",8)||strpbrk(cfg.source,"\r\n \t#")||
        get_string(&j,0,"bootstrap_nanodns",cfg.dns,sizeof(cfg.dns))||
@@ -158,16 +159,21 @@ static int parse_config(char *text) {
     int *values[]={&cfg.ready_ms,&cfg.api_ms,&cfg.dns_ms,&cfg.refresh_ms,&cfg.install_ms,&cfg.budget_ms,&cfg.launch_ms};
     for(size_t i=0;i<sizeof(names)/sizeof(names[0]);i++)if(json_int(&j,json_get(&j,0,names[i]),values[i])||*values[i]<50||*values[i]>900000)goto done;
     int a=json_get(&j,0,"sequence");
-    if(a<0||j.t[a].type!='['||j.t[a].children!=COUNT)goto done;
-    unsigned seen=0;int p=a+1;
-    for(int i=0;i<COUNT;i++){
-        char id[64];Step *s=&cfg.steps[i];
-        if(get_string(&j,p,"id",id,sizeof(id))||(s->id=id_index(id))<0||
-           (seen&(1u<<s->id))||json_int(&j,json_get(&j,p,"delay_ms"),&s->delay)||s->delay<0||s->delay>60000||
-           json_bool(&j,json_get(&j,p,"enabled"),&s->enabled))goto done;
-        seen|=1u<<s->id;p=j.t[p].next;
+    if(a<0||j.t[a].type!='['||j.t[a].children<COUNT||j.t[a].children>COUNT+1)goto done;
+    unsigned seen=0;int count=0,retired=0;
+    for(int p=a+1;p<j.t[a].next;p=j.t[p].next){
+        char id[64];Step s;
+        if(get_string(&j,p,"id",id,sizeof(id))||
+           json_int(&j,json_get(&j,p,"delay_ms"),&s.delay)||s.delay<0||s.delay>60000||
+           json_bool(&j,json_get(&j,p,"enabled"),&s.enabled))goto done;
+        /* Never install or execute the retired payload, even with an old config. */
+        if(!strcmp(id,"yt-blocker")){if(retired++)goto done;continue;}
+        s.id=id_index(id);
+        if(s.id<0||(seen&(1u<<s.id))||count>=COUNT)goto done;
+        seen|=1u<<s.id;cfg.steps[count++]=s;
     }
-    if(schema==1)migrate_v1();
+    if(count!=COUNT)goto done;
+    if(schema<3)migrate_legacy(schema);
     if(cfg.steps[0].id!=NANODNS||!cfg.steps[0].enabled||cfg.steps[1].id!=KSTUFF)goto done;
     rc=0;
 done:
@@ -293,7 +299,6 @@ static int matches_item(const Json *j,int item,int id) {
     *ext=0;
     if(id==DUMP_FORGE)return !strcasecmp(name,"dump-forge") || !strcasecmp(name,"ps5-dump-forge") ||
         (!strncasecmp(name,"ps5-dump-forge-",15) && strlen(name)>19 && !strcasecmp(name+strlen(name)-4,"-ps5"));
-    if(id==YT_BLOCKER)return !strcasecmp(name,"YT-Blocker") || !strncasecmp(name,"YT-Blocker_v",12);
     return 0;
 }
 static int select_installed(const Json *j,int id,Installed *out) {
@@ -457,66 +462,10 @@ static int boot_identity(char *out,size_t cap) {
     return snprintf(out,cap,"%lld.%06ld",(long long)tv.tv_sec,(long)tv.tv_usec)>=(int)cap?-1:0;
 #endif
 }
-static int youtube_closed(void) {
-#ifdef PM_HOST_TEST
-    const char *flag=getenv("PM_TEST_YOUTUBE_FLAG");
-    if(flag)return !access(flag,F_OK);
-    const char *v=getenv("PM_TEST_YOUTUBE_CLOSED");return !v||!strcmp(v,"1");
-#else
-    typedef struct { uint32_t app_id;uint64_t unknown1;char title_id[14];char unknown2[0x3c]; } AppInfo;
-    extern int sceKernelGetAppInfo(pid_t,AppInfo*);
-    Json j;if(api_json("GET","/processes_list",NULL,cfg.api_ms,&j,NULL))return 0;
-    int a=json_get(&j,0,"processes"),safe=1;
-    if(a<0||j.t[a].type!='['||!j.t[a].children){json_free(&j);return 0;}
-    for(int p=a+1;p<j.t[a].next;p=j.t[p].next){int pid;char name[128];
-        if(json_int(&j,json_get(&j,p,"pid"),&pid)||get_string(&j,p,"name",name,sizeof(name))){safe=0;break;}
-        AppInfo info={0};
-        if(sceKernelGetAppInfo((pid_t)pid,&info)){if(!strcmp(name,"eboot.bin"))safe=0;continue;}
-        if(!strncmp(info.title_id,"PPSA01650",9)||!strncmp(info.title_id,"PPSA01651",9)||!strncmp(info.title_id,"PPSA01652",9)){safe=0;break;}
-    }
-    json_free(&j);return safe;
-#endif
-}
 static void write_status(const char *phase) {
     char path[1024],text[512];if(path_join(path,sizeof(path),"status.json"))return;
     snprintf(text,sizeof(text),"{\"updater_version\":\"%s\",\"phase\":\"%s\",\"updated\":%d,\"problems\":%d}\n",PM_UPDATER_VERSION,phase,updates,problems);
     if(atomic_text(path,text))logmsg("Cannot write status.json");
-}
-/* Persist only an unattempted blocker. Clear the record before dispatch, so
- * a lost /loadpayload reply can never cause a second application of its patches. */
-static int read_pending_yt(const char *record,const char *boot,char path[512]) {
-    char *text=read_text(record,1024),id[128];
-    int prior_updates,prior_problems;
-    int ok=text && sscanf(text,"%127[^\n]\n%d\n%d\n%511[^\n]",id,&prior_updates,&prior_problems,path)==4
-           && !strcmp(id,boot) && path[0]=='/';
-    if(ok){updates=prior_updates;problems=prior_problems;}
-    free(text);return ok;
-}
-static int deliver_yt(const char *record,const char *boot,const char *path) {
-    if(!youtube_closed()){
-        char text[1024];
-        if(strpbrk(path,"\r\n"))return -1;
-        snprintf(text,sizeof(text),"%s\n%d\n%d\n%s",boot,updates,problems,path);
-        if(atomic_text(record,text))return -1;
-        write_status("waiting_youtube");
-        notify("Close YouTube for YT Blocker. Waiting up to one minute.");
-#ifdef PM_HOST_TEST
-        const int window=180,interval=20;
-#else
-        const int window=60000,interval=2000;
-#endif
-        long long end=clock_ms()+window;
-        for(;;){
-            pause_ms(interval);
-            if(youtube_closed())break;
-            if(clock_ms()>=end){
-                notify("YT Blocker pending. After closing YouTube, run PM AutoUpdate again.");
-                return 1;
-            }
-        }
-    }
-    if(unlink(record) && errno!=ENOENT)return -1;
-    return launch(ids[YT_BLOCKER],path);
 }
 int main(void) {
     signal(SIGPIPE,SIG_IGN);
@@ -535,26 +484,16 @@ int main(void) {
     if(flock(lock,LOCK_EX|LOCK_NB)){close(lock);notify("Another updater is running");return 0;}
     path_join(path,sizeof(path),"fallback");if(mkdir(path,0755)&&errno!=EEXIST){close(lock);return 2;}
     int result=1;Json settings={0},installed_json={0};Installed installed[COUNT]={0};
-    char boot[128],marker[1024],yt_record[1024];
-    if(path_join(yt_record,sizeof(yt_record),"pending-yt.txt"))goto done;
+    char boot[128],marker[1024];
+    /* Discard an unattempted payload left by versions before 1.2. */
+    if(!path_join(path,sizeof(path),"pending-yt.txt") && unlink(path) && errno!=ENOENT)
+        logmsg("Cannot remove retired pending marker; it will be ignored");
     if(boot_identity(boot,sizeof(boot))||path_join(marker,sizeof(marker),"started-boot.txt")){notify("Cannot identify boot safely; stopped");goto done;}
     text=read_text(marker,256);
     int started=text && !strcmp(text,boot);free(text);
     if(started){
-        char pending_path[512];
-        if(!read_pending_yt(yt_record,boot,pending_path)){
-            notify("Payload sequence already started this boot");result=0;goto done;
-        }
-        path_join(path,sizeof(path),"last.log");logfile=fopen(path,"a");
-        /* Reopening after Y2JB closes YouTube resumes only the unsent last payload. */
-        int enabled=0;
-        for(int i=0;i<COUNT;i++)if(cfg.steps[i].id==YT_BLOCKER)enabled=cfg.steps[i].enabled;
-        if(!enabled){notify("Pending YT Blocker is disabled in configuration");result=0;goto done;}
-        if(wait_pm(&settings)){notify("PM unavailable; YT Blocker remains pending");result=0;goto done;}
-        int sent=deliver_yt(yt_record,boot,pending_path);
-        if(sent<0){notify("YT Blocker transfer failed or unknown; reboot before retrying");goto done;}
-        if(!sent){write_status("done");notify("YT Blocker sent. Boot sequence complete.");}
-        result=0;goto done;
+        notify("Payload sequence already started this boot");
+        write_status("already_started");result=0;goto done;
     }
     path_join(path,sizeof(path),"last.log");logfile=fopen(path,"w");
     logmsg("PM AutoUpdate %s; native PM API, local-only kstuff",PM_UPDATER_VERSION);
@@ -604,7 +543,6 @@ int main(void) {
     /* Every operation above finishes or selects immutable fallback before this point. */
     if(atomic_text(marker,boot)){notify("Cannot record boot; stopped to prevent repeated kernel payloads");goto done;}
     write_status("launching");
-    int yt_pending=0;
     for(int i=1;i<COUNT;i++){
         Step *s=&cfg.steps[i];if(!s->enabled)continue;
         if(!valid_elf(installed[s->id].path)){
@@ -612,14 +550,12 @@ int main(void) {
             problems++;continue;
         }
         wait_gap(last_launch,cfg.steps[i-1].delay);
-        int sent=s->id==YT_BLOCKER ? deliver_yt(yt_record,boot,installed[s->id].path)
-                                   : launch(ids[s->id],installed[s->id].path);
-        if(sent<0){problems++;notify("Payload transfer failed; sequence stopped. Reboot before retrying");goto done;}
-        if(sent>0){yt_pending=1;continue;}
+        if(launch(ids[s->id],installed[s->id].path)){
+            problems++;notify("Payload transfer failed; sequence stopped. Reboot before retrying");goto done;
+        }
         last_launch=clock_ms();
     }
     result=0;
-    if(yt_pending){write_status("waiting_youtube");goto done;}
     write_status("done");
     char summary[256];snprintf(summary,sizeof(summary),"Finished: %d updated, %d warning(s). nanoDNS updates apply next boot.",updates,problems);notify(summary);
 done:

@@ -108,7 +108,7 @@ jobs:
           tag="pm-autoupdate-r${{ github.run_number }}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" --target "$GITHUB_SHA" \
-              --title "PM AutoUpdate 1.1.1 (build ${{ github.run_number }})" \
+              --title "PM AutoUpdate 1.2.0 (build ${{ github.run_number }})" \
               --notes-file pm/RELEASE_NOTES.md --latest
           fi
           gh release upload "$tag" dist/pm-autoupdate.elf dist/pm-autoupdate.zip \

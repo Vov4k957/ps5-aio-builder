@@ -98,20 +98,6 @@
       "author": "quer3q",
       "source": "https://github.com/quer3q/ps5-dump-forge",
       "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
-    },
-    {
-      "id": "yt-blocker",
-      "name": "YT Blocker",
-      "filename": "YT-Blocker_v1.0.2.elf",
-      "url": "https://github.com/Epinorr/y2jb-update-blocker/releases/download/v1.0.2/YT-Blocker_v1.0.2.elf",
-      "version": "v1.0.2",
-      "checksum": "6ab006d92685e1ef67f9984549a5d4e8df24f6f59b2452e77c2737be6ed7df5a",
-      "last_update": "2026-10-18",
-      "description": "Requires YouTube to be CLOSED. Modifies YouTube application metadata and system databases; backup first. Risk if launched through Y2JB with YouTube open.",
-      "category": "Vov4k957 Startup",
-      "author": "Epinorr",
-      "source": "https://github.com/Epinorr/y2jb-update-blocker",
-      "details_url": "https://raw.githubusercontent.com/Vov4k957/ps5-aio-builder/main/pm/README_RU.md"
     }
   ]
 }
