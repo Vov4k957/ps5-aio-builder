@@ -1,0 +1,36 @@
+name: MihawkOS 8.1 DST D3D9 test
+
+on:
+  push:
+    branches: [build/mihawkos81-dst-texkill]
+    paths:
+      - '.github/workflows/dst-d3d9.yml'
+      - 'dst-build/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  d3d9:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout build recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y meson ninja-build glslang-tools pkg-config g++ patch curl xz-utils
+      - name: Verify pinned sources, reproduce, patch and build x64 D3D9
+        run: python3 dst-build/build.py
+      - name: Save tested build and provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: MihawkOS-8.1-DST-d3d9-x64
+          path: dst-dist/
+          if-no-files-found: error
+          retention-days: 14
+

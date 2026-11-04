@@ -1,0 +1,45 @@
+{
+  "mihawkos_repository": "mihawk-99/PS5_MihawkOS",
+  "mihawkos_commit": "bc24d44be95f1c26ce297c0463f3bb31a751434a",
+  "mihawkos_release": "v8.1.0-alpha-8",
+  "runtime_stamp": "e9cd686bed842422",
+  "owned_inputs": [
+    {
+      "path": "platform/dxvk/patches/0001-prepare-images-for-external-rendering.patch",
+      "sha": "0fb36cd1e241e14a9cbe5dd4bb0da1388f84ed89"
+    },
+    {
+      "path": "platform/dxvk/patches/0002-identify-pinned-patched-build.patch",
+      "sha": "c73231428281a3893f19cbab6a03d4c293777199"
+    },
+    {
+      "path": "platform/dxvk/patches/0003-an-image-that-cannot-be-shared-asks-for-no-handle.patch",
+      "sha": "051a44cf0aeb6967af667edee5dc2adae67f2c8e"
+    },
+    {
+      "path": "platform/dxvk/patches/0004-dxgi-lists-adapters-without-vulkan-until-a-device-needs-it.patch",
+      "sha": "b4ce822e267ca8e8a950e8eeaaa2e5004f88574d"
+    },
+    {
+      "path": "platform/dxvk/patches/0005-a-fence-that-cannot-be-shared-asks-for-no-handle.patch",
+      "sha": "2972f32ac6ab9c2f86e22e56f4928ed8d6c5567b"
+    },
+    {
+      "path": "platform/dxvk/patches/0006-a-window-message-filter-skips-a-window-that-was-never-hooked.patch",
+      "sha": "3bdc0b4730666411dc577cf1c916391ffe846ca3"
+    },
+    {
+      "path": "platform/dxvk/patches/0007-share-textures-within-the-process-without-external-memory.patch",
+      "sha": "f2641d3d7c50c2cb15166455bf5ebf569c27067c"
+    },
+    {
+      "path": "platform/dxvk/pins.json",
+      "sha": "7f9b69f0086f0b014d82757ba3dcb93697d7353c"
+    }
+  ],
+  "toolchain": {
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64.tar.xz",
+    "sha256": "bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21"
+  },
+  "output_version": "v3.1-19-g601930949-ps5-1-dstfix1"
+}
