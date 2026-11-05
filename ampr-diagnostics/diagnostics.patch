@@ -1,26 +1,31 @@
 diff --git a/Makefile b/Makefile
-index b666748baabe24fc761782c01bb7da346925c218..6bccf53294a751207f59a48a39281fea4e0ef6b1 100644
+index b666748..019a51e 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -27,6 +27,15 @@ AMPR_INTERNAL_POOL_SIZE ?= 0x8000000
+@@ -27,6 +27,20 @@ AMPR_INTERNAL_POOL_SIZE ?= 0x8000000
  # memory. Profiles bigger than the release config no longer fit: a decoded
  # cache above the 16 MiB default halves down to 16 MiB, then is off (see
  # pack_decoded_cache_bytes in /metrics).
-+# Diagnostic 0.3.0 debug-only storage: unchanged lifecycle ring and
++# Diagnostic 0.4.0 debug-only storage: unchanged lifecycle ring and
 +# independently try-locked lane-head history (1024 point samples, 100 ms gate).
 +# Completion atomics add a last-block command tag/timestamp, 16 B per slot.
-+# JobState/ActiveRead/PreadTask retain the same diagId fields as 0.2.0.
++# JobState/ActiveRead retain the same diagId fields as 0.2.0.
++# The pread DONE publication stamp adds 8 B per task x 128 = 1024 B;
++# eight new streaming counters add 64 B. Host storage tests print layout
++# sizes. This 1088 B debug-only increase is outside the unchanged pool.
 +# Exact Store+Completion and Head/Row/store sizes are printed by host tests;
 +# tests assert their combined static allocation stays below 2 MiB.
 +# HTTP head scratch: 64 Rows, plus the existing 64 Items/Events and hist bins.
-+# Pool and scheduler/read knobs are unchanged. Console CPU/frame cost and
++# Pool and read knobs are unchanged; ready-only handoffs are capped at eight
++# per lane/pass and completion rechecks require a changed wake epoch.
++# Console CPU/frame cost and
 +# live memory peaks require a new console run and have not been measured.
  AMPR_DEBUG_POOL_SIZE ?= $(AMPR_INTERNAL_POOL_SIZE)
  # Release pread threads 16 -> 32 (tune::RELEASE_PREAD_THREADS) for split loose
  # reads; the pool peak did not change with 16, 32 and 64 threads (debug
 diff --git a/crates/ampr-sys/src/rt/diag.rs b/crates/ampr-sys/src/rt/diag.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d7d1d68b206beb2e1a5f3eb35f51d04027677b0d
+index 0000000..d7d1d68
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag.rs
 @@ -0,0 +1,481 @@
@@ -507,7 +512,7 @@ index 0000000000000000000000000000000000000000..d7d1d68b206beb2e1a5f3eb35f51d040
 +}
 diff --git a/crates/ampr-sys/src/rt/diag_heads.rs b/crates/ampr-sys/src/rt/diag_heads.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e8d374431df1a4891609409db0d304edc3587ecd
+index 0000000..e8d3744
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag_heads.rs
 @@ -0,0 +1,139 @@
@@ -651,7 +656,7 @@ index 0000000000000000000000000000000000000000..e8d374431df1a4891609409db0d304ed
 +    }
 +}
 diff --git a/crates/ampr-sys/src/rt/exports.rs b/crates/ampr-sys/src/rt/exports.rs
-index d030558bda1fdaa6148fdfde72f9eb02406ffba5..c02ef45543050a639922b15f3ba83dc774e735eb 100644
+index d030558..a1a3e9e 100644
 --- a/crates/ampr-sys/src/rt/exports.rs
 +++ b/crates/ampr-sys/src/rt/exports.rs
 @@ -387,30 +387,33 @@ mod mem_report {
@@ -770,7 +775,7 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..c02ef45543050a639922b15f3ba83dc7
 +            self.s(b"\n")
 +        }
 +        fn diag_header(&mut self, h:diag::Header)->&mut Self {
-+            self.s(b"ampr_diag ").u(diag::PROTOCOL).s(b"\ndiag_build 0.3.0\n")
++            self.s(b"ampr_diag ").u(diag::PROTOCOL).s(b"\ndiag_build 0.4.0\n")
 +                .s(b"upstream cd0c11efeedec45f2ed01715ff33c00898d40240\n")
 +                .s(b"build ").s(super::BUILD_REV.as_bytes()).s(b"\n")
 +                .kv("boot_ns",h.boot_ns).kv("now_ns",h.now_ns).kv("busy",h.busy as u64)
@@ -818,7 +823,7 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..c02ef45543050a639922b15f3ba83dc7
 +            diag::Query::Heads(after,limit)=>{
 +                let rows=unsafe{&mut *core::ptr::addr_of_mut!(HEAD_ROWS)};
 +                let(h,next,n,lost)=diag_heads::snapshot(after,&mut rows[..limit]);
-+                out.s(b"ampr_heads 1\ndiag_build 0.3.0\n").s(b"build ").s(super::BUILD_REV.as_bytes()).s(b"\n")
++                out.s(b"ampr_heads 1\ndiag_build 0.4.0\n").s(b"build ").s(super::BUILD_REV.as_bytes()).s(b"\n")
 +                    .kv("boot_ns",h.boot).kv("now_ns",h.now).kv("busy",h.busy as u64)
 +                    .kv("producer_dropped",h.dropped).kv("samples",h.samples)
 +                    .kv("sample_period_ns",diag_heads::PERIOD_NS).kv("event_capacity",diag_heads::CAP as u64)
@@ -882,7 +887,7 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..c02ef45543050a639922b15f3ba83dc7
              } else if n > 0 && req[..n as usize].starts_with(b"GET /set") {
                  unsafe { set(&req[..n as usize], metrics) };
 diff --git a/crates/ampr-sys/src/rt/mod.rs b/crates/ampr-sys/src/rt/mod.rs
-index d7cd1c94741fa944a37928e57f606b0a8f24b5fd..fb53aa9ac7c5ff809167da48cd853ed88192c9de 100644
+index d7cd1c9..fb53aa9 100644
 --- a/crates/ampr-sys/src/rt/mod.rs
 +++ b/crates/ampr-sys/src/rt/mod.rs
 @@ -4,6 +4,10 @@ mod amm;
@@ -897,7 +902,7 @@ index d7cd1c94741fa944a37928e57f606b0a8f24b5fd..fb53aa9ac7c5ff809167da48cd853ed8
  pub(crate) mod exports;
  mod fd_cache;
 diff --git a/crates/ampr-sys/src/rt/reactor/admission.rs b/crates/ampr-sys/src/rt/reactor/admission.rs
-index e9bd7ea5c1cb32efb77326e3c6b954956128ed8b..60a58d64f66c7355754c7acb919f43308d81d553 100644
+index e9bd7ea..60a58d6 100644
 --- a/crates/ampr-sys/src/rt/reactor/admission.rs
 +++ b/crates/ampr-sys/src/rt/reactor/admission.rs
 @@ -451,6 +451,8 @@ impl AprAioReactor {
@@ -911,7 +916,7 @@ index e9bd7ea5c1cb32efb77326e3c6b954956128ed8b..60a58d64f66c7355754c7acb919f4330
          if accountSubmit {
 diff --git a/crates/ampr-sys/src/rt/reactor/diagnostic_heads.rs b/crates/ampr-sys/src/rt/reactor/diagnostic_heads.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..57554cd6de9a616f77567b3043f6ecb8589989aa
+index 0000000..57554cd
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/reactor/diagnostic_heads.rs
 @@ -0,0 +1,54 @@
@@ -970,7 +975,7 @@ index 0000000000000000000000000000000000000000..57554cd6de9a616f77567b3043f6ecb8
 +    }
 +}
 diff --git a/crates/ampr-sys/src/rt/reactor/flush.rs b/crates/ampr-sys/src/rt/reactor/flush.rs
-index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..6325f3c4e123d49896e5a11d5d8564637b0c3ae0 100644
+index fd52b87..6325f3c 100644
 --- a/crates/ampr-sys/src/rt/reactor/flush.rs
 +++ b/crates/ampr-sys/src/rt/reactor/flush.rs
 @@ -328,11 +328,15 @@ impl AprAioReactor {
@@ -1026,7 +1031,7 @@ index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..6325f3c4e123d49896e5a11d5d856463
          self.stage_aio_submit(active, false);
          // Park the chain until the end-of-pass multiple-submit accepts this
 diff --git a/crates/ampr-sys/src/rt/reactor/job_state.rs b/crates/ampr-sys/src/rt/reactor/job_state.rs
-index 50e541d72a379fb7dde23061be317e5a1f6cb27d..a5c1c75465c02d5c24ecaa1d4f06c4a898688e0c 100644
+index 50e541d..a5c1c75 100644
 --- a/crates/ampr-sys/src/rt/reactor/job_state.rs
 +++ b/crates/ampr-sys/src/rt/reactor/job_state.rs
 @@ -133,6 +133,8 @@ impl AprAioReactor {
@@ -1081,8 +1086,63 @@ index 50e541d72a379fb7dde23061be317e5a1f6cb27d..a5c1c75465c02d5c24ecaa1d4f06c4a8
          #[cfg(feature = "mem_report")]
          let start = core::mem::take(&mut self.statReadDoneNs);
          #[cfg(not(feature = "mem_report"))]
+diff --git a/crates/ampr-sys/src/rt/reactor/lane_overlap.rs b/crates/ampr-sys/src/rt/reactor/lane_overlap.rs
+index d56d140..7be28e1 100644
+--- a/crates/ampr-sys/src/rt/reactor/lane_overlap.rs
++++ b/crates/ampr-sys/src/rt/reactor/lane_overlap.rs
+@@ -108,15 +108,6 @@ pub(crate) fn overlap_successor_op_allowed(t: OpType) -> bool {
+     matches!(t, WRITE_ADDRESS | WAIT_ON_ADDRESS)
+ }
+ 
+-/// Lane loop (progress.rs): after the head is released in a pass, go on to
+-/// its successor in the same pass instead of the next reactor iteration.
+-/// Without it a run of overlapped jobs whose reads are done publishes one job
+-/// per reactor iteration. Release: the knob is the constant false.
+-#[inline(always)]
+-pub(crate) fn lane_release_cascades() -> bool {
+-    crate::rt::tune::lane_eop_overlap()
+-}
+-
+ // ---- lane block diagnostics ----
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -504,6 +495,7 @@ mod tests {
+                 return (published, job1Issue);
+             }
+             let mut prior = false;
++            let mut budget = super::super::ready_handoff::ReadyHandoffBudget::new();
+             let mut i = 0;
+             while i < lane.len() {
+                 let j = &mut lane[i];
+@@ -528,7 +520,7 @@ mod tests {
+                     released += 1;
+                     // Only the head is released, so `prior` is still false.
+                     assert!(!prior);
+-                    if cascade {
++                    if cascade && budget.take(true, !lane.is_empty()) {
+                         continue;
+                     }
+                     break;
+@@ -613,4 +605,17 @@ mod tests {
+         assert!(pass(3) > pass(2), "b's second EOP waits for its own read");
+         assert!(pass(4) >= pass(3), "c never publishes before b");
+     }
++
++    #[test]
++    fn serial_ready_handoff_starts_only_after_the_prior_head_is_complete() {
++        let a = [read_file(), eop(1)];
++        let b = [read_file(), eop(2)];
++        let (old, old_issue) = run_lane_passes(&[&a, &b], false, false);
++        let (ready, ready_issue) = run_lane_passes(&[&a, &b], false, true);
++        assert_eq!(old.iter().map(|p|p.0).collect::<Vec<_>>(), [1, 2]);
++        assert_eq!(ready.iter().map(|p|p.0).collect::<Vec<_>>(), [1, 2]);
++        assert_eq!(ready_issue, ready[0].1);
++        assert!(ready_issue > 0, "the predecessor's read must complete first");
++        assert!(old_issue > ready_issue);
++    }
+ }
 diff --git a/crates/ampr-sys/src/rt/reactor/loose_pread.rs b/crates/ampr-sys/src/rt/reactor/loose_pread.rs
-index 2df4990e1fa101d7904906eb1a3a36bbb20424e2..7aac968370dbee518d1a1a4d148fb45360840fdd 100644
+index 2df4990..7aac968 100644
 --- a/crates/ampr-sys/src/rt/reactor/loose_pread.rs
 +++ b/crates/ampr-sys/src/rt/reactor/loose_pread.rs
 @@ -489,6 +489,8 @@ impl AprAioReactor {
@@ -1095,19 +1155,20 @@ index 2df4990e1fa101d7904906eb1a3a36bbb20424e2..7aac968370dbee518d1a1a4d148fb453
                      active.statSubmitNs = 0;
                      stats::add(Stat::AprReads, 1);
 diff --git a/crates/ampr-sys/src/rt/reactor/mod.rs b/crates/ampr-sys/src/rt/reactor/mod.rs
-index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..349f040e78b11eafeb82df7f915c87cc1df99432 100644
+index 0b67d1b..5afb5a1 100644
 --- a/crates/ampr-sys/src/rt/reactor/mod.rs
 +++ b/crates/ampr-sys/src/rt/reactor/mod.rs
-@@ -40,6 +40,8 @@ mod native;
+@@ -40,6 +40,9 @@ mod native;
  mod poll_deadline;
  mod pools;
  mod progress;
++mod ready_handoff;
 +#[cfg(feature = "mem_report")]
 +mod diagnostic_heads;
  mod read_window;
  mod setup;
  mod software;
-@@ -1084,6 +1086,8 @@ zeroed_default!(GatherScatterState, SyntheticWaitSlot);
+@@ -1084,6 +1087,8 @@ zeroed_default!(GatherScatterState, SyntheticWaitSlot);
  
  pub(crate) struct JobState {
      pub(crate) id: u64,
@@ -1116,7 +1177,7 @@ index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..349f040e78b11eafeb82df7f915c87cc
      pub(crate) sourceBuffer: *const u8,
      pub(crate) sourceBytes: u32,
      pub(crate) sourceOffset: u32,
-@@ -1195,6 +1199,8 @@ impl JobStateSlot {
+@@ -1195,6 +1200,8 @@ impl JobStateSlot {
  
  #[derive(Clone, Copy)]
  pub(crate) struct ActiveRead {
@@ -1125,17 +1186,19 @@ index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..349f040e78b11eafeb82df7f915c87cc
      pub(crate) job: JobPtr,
      pub(crate) desc: AprAioReadDesc,
      pub(crate) chain: *mut ReadChain,
-@@ -1588,6 +1594,8 @@ pub(crate) const PREAD_DONE: u32 = 3;
+@@ -1588,6 +1595,10 @@ pub(crate) const PREAD_DONE: u32 = 3;
  /// or retires a slot; a pool thread claims it under preadMutex and publishes
  /// completion with Release.
  pub(crate) struct PreadTask {
 +    #[cfg(feature = "mem_report")]
 +    pub(crate) diagId: u64,
++    #[cfg(feature = "mem_report")]
++    pub(crate) statCompletedNs: u64,
      pub(crate) state: AtomicU32,
      pub(crate) request: SceKernelAioRWRequest,
      pub(crate) targetSlot: u32,
 diff --git a/crates/ampr-sys/src/rt/reactor/native.rs b/crates/ampr-sys/src/rt/reactor/native.rs
-index e7b92141fcd56bd8dc0f97b3a58376434115b062..9489061b3f2fa2e1fefb9af34fcc9f002b7f9b4a 100644
+index e7b9214..9489061 100644
 --- a/crates/ampr-sys/src/rt/reactor/native.rs
 +++ b/crates/ampr-sys/src/rt/reactor/native.rs
 @@ -436,10 +436,16 @@ impl AprAioReactor {
@@ -1215,7 +1278,7 @@ index e7b92141fcd56bd8dc0f97b3a58376434115b062..9489061b3f2fa2e1fefb9af34fcc9f00
                  self.passWaitOnAddressPending = true;
              }
 diff --git a/crates/ampr-sys/src/rt/reactor/pools.rs b/crates/ampr-sys/src/rt/reactor/pools.rs
-index f64d77682a7d0352b3a6d82ce926d82224f9a7cd..fae3f402ae59fbe08e207fbd51be0d2fb311a728 100644
+index f64d776..fae3f40 100644
 --- a/crates/ampr-sys/src/rt/reactor/pools.rs
 +++ b/crates/ampr-sys/src/rt/reactor/pools.rs
 @@ -67,6 +67,8 @@ impl AprAioReactor {
@@ -1237,7 +1300,7 @@ index f64d77682a7d0352b3a6d82ce926d82224f9a7cd..fae3f402ae59fbe08e207fbd51be0d2f
          s.prev = kInvalid;
          s.next = kInvalid;
 diff --git a/crates/ampr-sys/src/rt/reactor/pread_pool.rs b/crates/ampr-sys/src/rt/reactor/pread_pool.rs
-index a33c034ca435ca466cd9231726f173bf1ccfb17d..1d42315339d809396cabee2f572bc364f5b88f69 100644
+index a33c034..65a095b 100644
 --- a/crates/ampr-sys/src/rt/reactor/pread_pool.rs
 +++ b/crates/ampr-sys/src/rt/reactor/pread_pool.rs
 @@ -66,6 +66,10 @@ impl AprAioReactor {
@@ -1260,7 +1323,16 @@ index a33c034ca435ca466cd9231726f173bf1ccfb17d..1d42315339d809396cabee2f572bc364
              let readNs = stats::since(readStartNs);
              stats::add(Stat::PreadReads, 1);
              stats::add(Stat::PreadBytes, bytesRead);
-@@ -175,6 +181,13 @@ impl AprAioReactor {
+@@ -97,6 +103,8 @@ impl AprAioReactor {
+             let task = unsafe { addr_of_mut!((*this).preadTasks[slot]) };
+             unsafe {
+                 (*task).returnValue = result;
++                #[cfg(feature = "mem_report")]
++                { (*task).statCompletedNs = stats::now(); }
+                 (*task).state.store(PREAD_DONE, Ordering::Release)
+             };
+             let _wakeGuard = unsafe { (&*addr_of!((*this).m)).lock() };
+@@ -175,9 +183,18 @@ impl AprAioReactor {
          if found != requests.len() {
              return SCE_KERNEL_ERROR_EAGAIN;
          }
@@ -1274,7 +1346,12 @@ index a33c034ca435ca466cd9231726f173bf1ccfb17d..1d42315339d809396cabee2f572bc364
          for (requestIndex, request) in requests.iter().enumerate() {
              let task = &mut self.preadTasks[slots[requestIndex]];
              task.request = *request;
-@@ -186,6 +199,15 @@ impl AprAioReactor {
++            #[cfg(feature = "mem_report")]
++            { task.statCompletedNs = 0; }
+             task.targetSlot = targetSlot;
+             task.targetGeneration = targetGeneration;
+             task.requestIndex = requestIndex as u32;
+@@ -186,6 +203,15 @@ impl AprAioReactor {
              task.sequence = self.preadNextSequence;
              self.preadNextSequence = self.preadNextSequence.wrapping_add(1);
              task.statQueuedNs = stats::now();
@@ -1290,8 +1367,21 @@ index a33c034ca435ca466cd9231726f173bf1ccfb17d..1d42315339d809396cabee2f572bc364
              task.state.store(PREAD_QUEUED, Ordering::Release);
          }
          self.preadPendingCount += requests.len() as u32;
+@@ -206,6 +232,12 @@ impl AprAioReactor {
+                 continue;
+             }
+             let task = &self.preadTasks[slot];
++            #[cfg(feature = "mem_report")]
++            if let Some(delay) = ready_handoff::completion_observe_delay_ns(task.statCompletedNs, stats::now()) {
++                stats::add(Stat::PreadCompletionObserved, 1);
++                stats::add(Stat::PreadCompletionObserveNs, delay);
++                stats::max(Stat::PreadCompletionObserveNsMax, delay);
++            }
+             if task.looseRead {
+                 let target = ActiveReadRef {
+                     slot: task.targetSlot,
 diff --git a/crates/ampr-sys/src/rt/reactor/progress.rs b/crates/ampr-sys/src/rt/reactor/progress.rs
-index ca52c325441053ce0cfd9ffe1073a98264faee4f..4981e47baa8320db399ce62472af46128d1d72eb 100644
+index ca52c32..26a298b 100644
 --- a/crates/ampr-sys/src/rt/reactor/progress.rs
 +++ b/crates/ampr-sys/src/rt/reactor/progress.rs
 @@ -10,6 +10,10 @@ impl AprAioReactor {
@@ -1314,7 +1404,11 @@ index ca52c325441053ce0cfd9ffe1073a98264faee4f..4981e47baa8320db399ce62472af4612
          }
          admission.laneDemandMask = laneDemandMask;
          progressed |= self.stage_external_aio_submits(&mut admission, true);
-@@ -42,6 +48,8 @@ impl AprAioReactor {
+@@ -39,9 +45,12 @@ impl AprAioReactor {
+             // commands left (lane_overlap.rs): later jobs keep the prior read
+             // fence and stay off the native batch and AMM engine.
+             let mut priorLaneOverlap = false;
++            let mut readyHandoffs = ready_handoff::ReadyHandoffBudget::new();
              let mut job = laneHeads[lane];
              while !job.is_null() {
                  if self.native_batch_wait_pending(lane as u32) {
@@ -1323,6 +1417,30 @@ index ca52c325441053ce0cfd9ffe1073a98264faee4f..4981e47baa8320db399ce62472af4612
                      if unsafe { !(*job).priorityNext.load(Ordering::Acquire).is_null() } {
                          lane_overlap::note_lane_block(lane_overlap::LaneBlock::Wait);
                      }
+@@ -57,17 +66,16 @@ impl AprAioReactor {
+                     &mut readIssueBudget,
+                     &mut admission,
+                 );
+-                // A synchronously released/failed head is a pass boundary; a
+-                // blocked or partially admitted head keeps the lane. With
+-                // lane_eop_overlap the released head's successor is the new
+-                // head and runs in this pass (lane_overlap.rs
+-                // lane_release_cascades): only the head is ever released, so
+-                // the prior flags are still false here.
++                // Only a released head hands this pass to its successor.
++                // Keep the existing read budget and cap ready handoffs;
++                // blocked heads still stop here with overlap disabled.
+                 if job.is_null() {
+-                    if lane_overlap::lane_release_cascades() && !next.is_null() {
++                    if readyHandoffs.take(true, !next.is_null()) {
++                        stats::add(Stat::ReadyLaneHandoffs, 1);
+                         job = next;
+                         continue;
+                     }
++                    if !next.is_null() { stats::add(Stat::ReadyLaneHandoffYields, 1); }
+                     break;
+                 }
+                 let j = unsafe { &mut *job };
 @@ -559,6 +567,8 @@ impl AprAioReactor {
          terminal: bool,
          nowNs: u64,
@@ -1341,8 +1459,104 @@ index ca52c325441053ce0cfd9ffe1073a98264faee4f..4981e47baa8320db399ce62472af4612
          let latencyNs = nowNs.saturating_sub(*submitNs);
          let detectNs = if *lastPollNs != 0 {
              nowNs.saturating_sub(*lastPollNs)
+diff --git a/crates/ampr-sys/src/rt/reactor/ready_handoff.rs b/crates/ampr-sys/src/rt/reactor/ready_handoff.rs
+new file mode 100644
+index 0000000..f749da4
+--- /dev/null
++++ b/crates/ampr-sys/src/rt/reactor/ready_handoff.rs
+@@ -0,0 +1,90 @@
++//! Bounded handoff after a lane head is released, without speculative reads.
++//! A ready successor need not wait for another full reactor pass. Keep a
++//! small per-lane budget so a chain of ready jobs cannot monopolize a pass.
++
++pub(crate) const READY_HANDOFF_LIMIT: u32 = 8;
++
++pub(crate) struct ReadyHandoffBudget {
++    remaining: u32,
++}
++
++impl ReadyHandoffBudget {
++    pub(crate) fn new() -> Self {
++        Self { remaining: READY_HANDOFF_LIMIT }
++    }
++
++    pub(crate) fn take(&mut self, released: bool, has_next: bool) -> bool {
++        if !released || !has_next || self.remaining == 0 {
++            return false;
++        }
++        self.remaining -= 1;
++        true
++    }
++}
++
++/// Recheck only when something woke the reactor after the initial drain.
++/// Every pread DONE publication wakes it; new submits may also cause a
++/// harmless recheck. Equal epochs never cause an extra scan.
++pub(crate) fn recheck_pread_completions(pending: u32, before: u64, after: u64) -> bool {
++    pending != 0 && before != after
++}
++
++#[cfg(any(test, feature = "mem_report"))]
++pub(crate) fn completion_observe_delay_ns(published: u64, observed: u64) -> Option<u64> {
++    (published != 0 && observed >= published).then(|| observed - published)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn a_blocked_head_and_an_empty_lane_never_consume_the_budget() {
++        let mut budget = ReadyHandoffBudget::new();
++        for _ in 0..100 {
++            assert!(!budget.take(false, true));
++            assert!(!budget.take(true, false));
++        }
++        for _ in 0..READY_HANDOFF_LIMIT { assert!(budget.take(true, true)); }
++        assert!(!budget.take(true, true));
++    }
++
++    #[test]
++    fn a_ready_chain_yields_after_eight_handoffs_and_resets_next_pass() {
++        let mut budget = ReadyHandoffBudget::new();
++        let mut transitions = 0;
++        while budget.take(true, true) { transitions += 1; }
++        assert_eq!(transitions, 8);
++        let mut next_pass = ReadyHandoffBudget::new();
++        assert!(next_pass.take(true, true));
++    }
++
++    #[test]
++    fn completion_recheck_needs_pending_tasks_and_a_changed_epoch() {
++        assert!(!recheck_pread_completions(0, 10, 11));
++        assert!(!recheck_pread_completions(1, 10, 10));
++        assert!(recheck_pread_completions(1, 10, 11));
++        assert!(recheck_pread_completions(1, u64::MAX, 0));
++    }
++
++    #[test]
++    fn completion_delay_uses_only_valid_same_clock_timestamps() {
++        assert_eq!(completion_observe_delay_ns(100, 125), Some(25));
++        assert_eq!(completion_observe_delay_ns(100, 100), Some(0));
++        assert_eq!(completion_observe_delay_ns(0, 125), None);
++        assert_eq!(completion_observe_delay_ns(125, 100), None);
++    }
++
++    #[test]
++    fn ready_handoff_storage_measurement() {
++        // The new stamp exists only in mem_report and adds eight bytes per
++        // task. The eight streaming metrics add 64 bytes of debug atomics.
++        let stamp_bytes = if cfg!(feature = "mem_report") { super::super::AMPR_EMU_PACK_PREAD_TASKS * 8 } else { 0 };
++        let stats_bytes = if cfg!(feature = "mem_report") { 8 * 8 } else { 0 };
++        println!("ready_handoff storage: PreadTask={} reactor={} stamp_bytes={} stats_bytes={}",
++            core::mem::size_of::<super::super::PreadTask>(),
++            core::mem::size_of::<super::super::AprAioReactor>(),
++            stamp_bytes, stats_bytes);
++        assert_eq!(stamp_bytes + stats_bytes, if cfg!(feature = "mem_report") { 1088 } else { 0 });
++    }
++}
 diff --git a/crates/ampr-sys/src/rt/reactor/setup.rs b/crates/ampr-sys/src/rt/reactor/setup.rs
-index 4daf1a0ff10eae4b8a4dcba9a06f525b0fb398bc..bf418357f61d24d19e9cad785e8da5e16a21eaa6 100644
+index 4daf1a0..bf41835 100644
 --- a/crates/ampr-sys/src/rt/reactor/setup.rs
 +++ b/crates/ampr-sys/src/rt/reactor/setup.rs
 @@ -100,6 +100,10 @@ impl AprAioReactor {
@@ -1357,7 +1571,7 @@ index 4daf1a0ff10eae4b8a4dcba9a06f525b0fb398bc..bf418357f61d24d19e9cad785e8da5e1
          if let Some(tail) = unsafe { priorityTail.as_ref() } {
              tail.priorityNext.store(job, Ordering::Release);
 diff --git a/crates/ampr-sys/src/rt/reactor/software.rs b/crates/ampr-sys/src/rt/reactor/software.rs
-index ca0c5d44ec4970557576b4b0dff83b02d3c48425..d7dbc62cc8fc39da2af3c5a505710d2da075943e 100644
+index ca0c5d4..d7dbc62 100644
 --- a/crates/ampr-sys/src/rt/reactor/software.rs
 +++ b/crates/ampr-sys/src/rt/reactor/software.rs
 @@ -432,6 +432,8 @@ impl AprAioReactor {
@@ -1369,3 +1583,79 @@ index ca0c5d44ec4970557576b4b0dff83b02d3c48425..d7dbc62cc8fc39da2af3c5a505710d2d
              return false;
          }
          let effectiveRead = *read;
+diff --git a/crates/ampr-sys/src/rt/reactor/worker.rs b/crates/ampr-sys/src/rt/reactor/worker.rs
+index ad0ff74..7192712 100644
+--- a/crates/ampr-sys/src/rt/reactor/worker.rs
++++ b/crates/ampr-sys/src/rt/reactor/worker.rs
+@@ -1,6 +1,7 @@
+ //! Native micro completion, job release, the worker loop, construction and the C ABI.
+ 
+ use super::*;
++use crate::rt::stats::{self, Stat};
+ 
+ /// Locks `m` without tying the guard to the `&self` borrow
+ fn lock_detached(m: &Mutex) -> MutexGuard<'static> {
+@@ -234,6 +235,7 @@ impl AprAioReactor {
+         // WAIT_ON_ADDRESS has no wake source: poll with exponential backoff.
+         let mut waitOnAddressBackoffNs = AMPR_EMU_APR_ACTIVE_LANE_IDLE_SLEEP_NS;
+         loop {
++            stats::add(Stat::ReactorPasses, 1);
+             let shuttingDown = self.shutdownRequested.load(Ordering::Acquire);
+             let waitIfIdle = !shuttingDown
+                 && !self.has_active_lanes_locked()
+@@ -251,6 +253,7 @@ impl AprAioReactor {
+ 
+             // Pread pool completions (pread_pool.rs); a later completion bumps the
+             // epoch observed above, so the wait below returns at once.
++            let preadDrainEpoch = self.reactorWakeEpoch.load(Ordering::Acquire);
+             let mut progressed = self.drain_pread_completions();
+             if shuttingDown && !self.prepare_native_batches_for_shutdown() {
+                 abort();
+@@ -278,6 +281,19 @@ impl AprAioReactor {
+             self.refresh_native_batch_progress_snapshots();
+             progressed |= self.progress_native_batches();
+ 
++            // No admission snapshot or lane pointers exist yet. Observe a
++            // completion that arrived during AIO/native processing before
++            // deciding that a read window or completion fence is still full.
++            if ready_handoff::recheck_pread_completions(
++                self.preadPendingCount, preadDrainEpoch,
++                self.reactorWakeEpoch.load(Ordering::Acquire),
++            ) {
++                stats::add(Stat::PreadCompletionRechecks, 1);
++                let completed = self.drain_pread_completions();
++                if completed { stats::add(Stat::PreadCompletionRecheckProgress, 1); }
++                progressed |= completed;
++            }
++
+             // Phase 2: exactly one fair cursor pass.
+             self.passWaitOnAddressPending = false;
+             self.passReadBlockedOnAioCapacity = false;
+diff --git a/crates/ampr-sys/src/rt/stats.rs b/crates/ampr-sys/src/rt/stats.rs
+index bfd32b7..a65fe6b 100644
+--- a/crates/ampr-sys/src/rt/stats.rs
++++ b/crates/ampr-sys/src/rt/stats.rs
+@@ -18,6 +18,15 @@ macro_rules! stats {
+ }
+ 
+ stats! {
++    /// Ready handoff and pread publication-to-observation diagnostics (0.4.0).
++    ReactorPasses = "reactor_passes",
++    ReadyLaneHandoffs = "ready_lane_handoffs",
++    ReadyLaneHandoffYields = "ready_lane_handoff_yields",
++    PreadCompletionRechecks = "pread_completion_rechecks",
++    PreadCompletionRecheckProgress = "pread_completion_recheck_progress",
++    PreadCompletionObserved = "pread_completion_observed",
++    PreadCompletionObserveNs = "pread_completion_observe_ns",
++    PreadCompletionObserveNsMax = "pread_completion_observe_ns_max",
+     /// Physical pack-volume reads issued (kernel AIO or pread) and their bytes.
+     PackDiskReads = "pack_disk_reads",
+     PackDiskBytes = "pack_disk_bytes",
+@@ -226,6 +235,7 @@ static VALUES: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
+ #[cfg(feature = "mem_report")]
+ fn resets_on_read(s: usize) -> bool {
+     s == Stat::PackJobNsMax as usize
++        || s == Stat::PreadCompletionObserveNsMax as usize
+         || s == Stat::AprReadNsMax as usize
+         || s == Stat::ExtReadNsMax as usize
+         || s == Stat::AprInflightMax as usize
