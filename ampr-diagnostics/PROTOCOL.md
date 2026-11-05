@@ -128,3 +128,32 @@ Two stores are independently try-locked. Producers never wait for HTTP and
 no diagnostic field changes scheduling, completion publication or read knobs.
 Combined bounded storage is measured/asserted by host tests. Console overhead
 and behavior still require console validation.
+
+## Diagnostic 0.4.0 ready handoff
+
+The lifecycle and head wire schemas do not change. `diag_build` is 0.4.0.
+The upstream package version in `build` remains 0.3.0; the revision ends in
+`-diag04`. No frame-timing measurement is added.
+
+New monotonic counters:
+
+- `reactor_passes`: worker loop entries.
+- `ready_lane_handoffs`: same-pass transitions after a head was released.
+- `ready_lane_handoff_yields`: a nonempty successor chain reached the
+  eight-handoff limit and yielded to the remaining lanes.
+- `pread_completion_rechecks`: extra pre-cursor drains when pending pread
+  work exists and the wake epoch changed since the initial drain.
+- `pread_completion_recheck_progress`: such drains that retired a part.
+- `pread_completion_observed`: completed parts whose publication stamp was
+  observed. Applies to loose and pack pread tasks, independently of event
+  sampling. A split logical read contributes multiple parts.
+- `pread_completion_observe_ns`: sum of DONE-publication to reactor
+  observation durations for the above parts, same monotonic clock.
+
+`pread_completion_observe_ns_max` resets on each metrics scrape. The sum
+uses the matching observation count, so an interval mean is defined. It
+measures notification/observation delay, not syscall time or frame delay.
+
+Ready handoff does not enable EOP overlap. Only a fully released head can
+hand off; read budgets remain per lane/pass and blocked heads stop the
+lane under the baseline setting `lane_eop_overlap=0`.
