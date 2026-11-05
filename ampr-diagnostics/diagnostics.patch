@@ -20,10 +20,10 @@ index b666748baabe24fc761782c01bb7da346925c218..6bccf53294a751207f59a48a39281fea
  # reads; the pool peak did not change with 16, 32 and 64 threads (debug
 diff --git a/crates/ampr-sys/src/rt/diag.rs b/crates/ampr-sys/src/rt/diag.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..86874ac5914076f6631d8b846be9a07952420ac3
+index 0000000000000000000000000000000000000000..d7d1d68b206beb2e1a5f3eb35f51d04027677b0d
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag.rs
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,481 @@
 +//! Bounded debug diagnostics. Completion publication is independent of the
 +//! history lock; a busy HTTP reader cannot leave a finished operation active.
 +//! Read lifecycles are sampled before path lookup. History keeps slow endings
@@ -498,6 +498,8 @@ index 0000000000000000000000000000000000000000..86874ac5914076f6631d8b846be9a079
 +        assert!(STORE_BYTES<2*1024*1024);assert_eq!(core::mem::align_of::<Item>(),8);
 +    }
 +    #[test]fn diagnostic_routes_and_bounds(){
++        assert_eq!(query(b"/diag/heads?after=17&limit=2"),Some(Query::Heads(17,2)));
++        assert_eq!(query(b"/diag/heads?cursor=1"),Some(Query::Invalid));
 +        assert_eq!(query(b"/metrics"),None);assert_eq!(query(b"/diag/active?cursor=20&limit=4"),Some(Query::Active(20,4)));
 +        assert_eq!(query(b"/diag/events?after=9000000000&limit=64"),Some(Query::Events(9000000000,64)));
 +        for target in [b"/diag/events?after=-1" as &[u8],b"/diag/active?cursor=1025",b"/diag/active?limit=0",b"/diag/events?after=1&after=2",b"/diag/info?set=1"]{assert_eq!(query(target),Some(Query::Invalid));}
@@ -505,10 +507,10 @@ index 0000000000000000000000000000000000000000..86874ac5914076f6631d8b846be9a079
 +}
 diff --git a/crates/ampr-sys/src/rt/diag_heads.rs b/crates/ampr-sys/src/rt/diag_heads.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e2969a031dc941f999c0bf717ef8f2c48302ba9
+index 0000000000000000000000000000000000000000..e8d374431df1a4891609409db0d304edc3587ecd
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag_heads.rs
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,139 @@
 +//! Reactor-owned lane-head observations, independent of lifecycle history.
 +//! Samples are points in time, not frame timings or a proof that a condition
 +//! held between samples. The HTTP thread reads copies and never reads jobs.
@@ -603,7 +605,7 @@ index 0000000000000000000000000000000000000000..6e2969a031dc941f999c0bf717ef8f2c
 +#[cfg(feature="mem_report")]
 +pub(crate) fn snapshot(after:u64,out:&mut [Row])->(Header,u64,usize,u64){
 +    let now=super::stats::now();let boot=super::diag::boot_ns();let dropped=DROPPED.load(Ordering::Relaxed);
-+    with_store(|s|{let(next,n,lost)=s.page(after,out);
++    with_store(|s|{let(next,n,lost)=s.page(after,out);let now=super::stats::now();
 +        (Header{now,boot,busy:false,dropped,samples:s.samples,oldest:s.oldest(),next:s.next},next,n,lost)})
 +        .unwrap_or((Header{now,boot,busy:true,dropped,samples:0,oldest:0,next:0},after,0,0))
 +}
@@ -637,6 +639,11 @@ index 0000000000000000000000000000000000000000..6e2969a031dc941f999c0bf717ef8f2c
 +    #[test]fn gate_caps_sampling_without_sleeping(){
 +        let gate=Gate::new();assert!(gate.take(1));for n in 2..1000{assert!(!gate.take(n));}
 +        assert!(gate.take(PERIOD_NS+1));assert!(!gate.take(1));
++    }
++    #[test]fn a_busy_http_reader_never_makes_the_producer_wait(){
++        LOCK.store(true,Ordering::Release);
++        assert!(with_store(|_|panic!("busy store entered")).is_none());
++        LOCK.store(false,Ordering::Release);
 +    }
 +    #[test]fn head_store_has_a_bounded_memory_budget(){
 +        println!("head storage: Head={} Row={} Store={} lanes={}",core::mem::size_of::<Head>(),core::mem::size_of::<Row>(),STORE_BYTES,LANES);
@@ -1128,7 +1135,7 @@ index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..349f040e78b11eafeb82df7f915c87cc
      pub(crate) request: SceKernelAioRWRequest,
      pub(crate) targetSlot: u32,
 diff --git a/crates/ampr-sys/src/rt/reactor/native.rs b/crates/ampr-sys/src/rt/reactor/native.rs
-index e7b92141fcd56bd8dc0f97b3a58376434115b062..6d46ae53a9607e952f75babfa68b8ac852a79c11 100644
+index e7b92141fcd56bd8dc0f97b3a58376434115b062..9489061b3f2fa2e1fefb9af34fcc9f002b7f9b4a 100644
 --- a/crates/ampr-sys/src/rt/reactor/native.rs
 +++ b/crates/ampr-sys/src/rt/reactor/native.rs
 @@ -436,10 +436,16 @@ impl AprAioReactor {
@@ -1166,7 +1173,15 @@ index e7b92141fcd56bd8dc0f97b3a58376434115b062..6d46ae53a9607e952f75babfa68b8ac8
              return self.retry_native_amm_micro(j!(job)) || progressed;
          }
          if j!(job).sourceOffset != sourceOffsetAtEntry {
-@@ -852,10 +862,14 @@ impl AprAioReactor {
+@@ -847,15 +857,21 @@ impl AprAioReactor {
+                 completionReadSequence,
+             ) {
+                 if !Self::job_failed(jb) {
+-                    Self::cache_decoded_op(jb, op, opBytes);
++                    #[cfg(feature = "mem_report")]
++                    crate::rt::diag::job_block(jb, crate::rt::diag::WAIT_NATIVE, op.op_type);
++                Self::cache_decoded_op(jb, op, opBytes);
+                 }
                  return CommandFlow::Stop;
              }
              Self::cache_decoded_op(jb, op, opBytes);
@@ -1181,7 +1196,7 @@ index e7b92141fcd56bd8dc0f97b3a58376434115b062..6d46ae53a9607e952f75babfa68b8ac8
              Self::cache_decoded_op(jb, op, opBytes);
              return CommandFlow::Stop;
          }
-@@ -864,6 +878,8 @@ impl AprAioReactor {
+@@ -864,6 +880,8 @@ impl AprAioReactor {
                  && !Self::software_op_uses_native_apr_batch(op.op_type))
                  || op.op_type == WRITE_EQUEUE)
          {
@@ -1190,7 +1205,7 @@ index e7b92141fcd56bd8dc0f97b3a58376434115b062..6d46ae53a9607e952f75babfa68b8ac8
              Self::cache_decoded_op(jb, op, opBytes);
              return CommandFlow::Stop;
          }
-@@ -921,6 +937,8 @@ impl AprAioReactor {
+@@ -921,6 +939,8 @@ impl AprAioReactor {
          }
          if !softwareAddressComplete {
              if op.op_type == WAIT_ON_ADDRESS {
