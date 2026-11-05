@@ -20,10 +20,10 @@ index b666748baabe24fc761782c01bb7da346925c218..f6ab1961506459cf2632eb486a345556
  # reads; the pool peak did not change with 16, 32 and 64 threads (debug
 diff --git a/crates/ampr-sys/src/rt/diag.rs b/crates/ampr-sys/src/rt/diag.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..00ee1f966933cb735b4a07335aed455705d183bd
+index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280dfc428966
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag.rs
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,427 @@
 +//! Bounded debug diagnostics. Completion publication is independent of the
 +//! history lock; a busy HTTP reader cannot leave a finished operation active.
 +//! Read lifecycles are sampled before path lookup. History keeps slow endings
@@ -93,12 +93,12 @@ index 0000000000000000000000000000000000000000..00ee1f966933cb735b4a07335aed4557
 +// Slot identity includes a generation. Only a successful ACTIVE -> WRITING
 +// CAS may publish an ending; a late/duplicate finish cannot touch a reused slot.
 +struct Completion {
-+    state:AtomicU64,at:AtomicU64,result:AtomicI64,stage:AtomicU64,gap_id:AtomicU64,
++    state:AtomicU64,at:AtomicU64,result:AtomicI64,stage:AtomicU64,gap_id:AtomicU64,wait_key:AtomicU64,
 +}
 +impl Completion {
 +    const fn new()->Self {Self {state:AtomicU64::new(0),at:AtomicU64::new(0),
-+        result:AtomicI64::new(0),stage:AtomicU64::new(0),gap_id:AtomicU64::new(0)}}
-+    fn activate(&self,id:u64) {self.gap_id.store(0,Ordering::Relaxed);self.state.store((id<<2)|1,Ordering::Release);}
++        result:AtomicI64::new(0),stage:AtomicU64::new(0),gap_id:AtomicU64::new(0),wait_key:AtomicU64::new(0)}}
++    fn activate(&self,id:u64) {self.gap_id.store(0,Ordering::Relaxed);self.wait_key.store(0,Ordering::Relaxed);self.state.store((id<<2)|1,Ordering::Release);}
 +    fn complete(&self,id:u64,stage:u8,result:i64,now:u64)->bool {
 +        if self.state.compare_exchange((id<<2)|1,(id<<2)|2,Ordering::Acquire,Ordering::Relaxed).is_err(){return false;}
 +        self.at.store(now,Ordering::Relaxed);self.result.store(result,Ordering::Relaxed);
@@ -152,7 +152,8 @@ index 0000000000000000000000000000000000000000..00ee1f966933cb735b4a07335aed4557
 +            if self.items[i].id!=0{continue;}
 +            item.id=item.id*A as u64+i as u64;item.created_ns=now;item.changed_ns=now;
 +            if item.kind==JOB{item.wait_reason=WAIT_OTHER;item.wait_since_ns=now;}
-+            self.items[i]=item;done[i].activate(item.id);self.active+=1;return item.id;
++            self.items[i]=item;done[i].activate(item.id);
++            done[i].wait_key.store((item.wait_reason as u64)<<32,Ordering::Relaxed);self.active+=1;return item.id;
 +        }
 +        self.table_skips=self.table_skips.saturating_add(1);0
 +    }
@@ -173,7 +174,7 @@ index 0000000000000000000000000000000000000000..00ee1f966933cb735b4a07335aed4557
 +        let since=item.wait_since_ns;let span=now.saturating_sub(since);Self::close_wait(&mut item,now);
 +        if span>=100_000_000{let mut closed=item;closed.wait_since_ns=since;self.push(closed,now,span,false);}
 +        item.wait_reason=reason;item.wait_blocker=blocker;item.wait_opcode=opcode;
-+        self.items[i]=item;
++        self.items[i]=item;done[i].wait_key.store(((reason as u64)<<32)|opcode as u64,Ordering::Relaxed);
 +    }
 +    fn change(&mut self,id:u64,stage:u8,result:i64,now:u64,ended:bool,done:&[Completion;A]) {
 +        if id==0{return;}let Some(i)=self.slot(id)else{self.missing_updates=self.missing_updates.saturating_add(1);return;};
@@ -257,6 +258,9 @@ index 0000000000000000000000000000000000000000..00ee1f966933cb735b4a07335aed4557
 +pub(crate) fn job_wait(job:&super::reactor::JobState,reason:u8,blocker:u64,opcode:u8) {
 +    if job.statAcceptNs==0||job.diagId==0{return;}
 +    let id=job.diagId;let i=(id%ACTIVE_CAP as u64)as usize;
++    // Repeated checks on the same blocked command do not acquire the store
++    // lock or read the clock. A failed transition is retried on the next pass.
++    if !DONE[i].live(id)||DONE[i].wait_key.load(Ordering::Relaxed)==(((reason as u64)<<32)|opcode as u64){return;}
 +    if with_store(|s|s.wait(id,reason,blocker,opcode as u32,clock(),&DONE,false)).is_none(){
 +        DONE[i].gap_id.store(id,Ordering::Relaxed);DROPPED.fetch_add(1,Ordering::Relaxed);
 +    }
@@ -264,7 +268,11 @@ index 0000000000000000000000000000000000000000..00ee1f966933cb735b4a07335aed4557
 +#[cfg(feature="mem_report")]
 +pub(crate) fn job_enter(job:&super::reactor::JobState) {
 +    if job.statAcceptNs==0||job.diagId==0{return;}
-+    let _=with_store(|s|s.wait(job.diagId,WAIT_OTHER,0,0,clock(),&DONE,true));
++    let id=job.diagId;let i=(id%ACTIVE_CAP as u64)as usize;
++    if !DONE[i].live(id)||(DONE[i].wait_key.load(Ordering::Relaxed)>>32)!=WAIT_PRIOR as u64{return;}
++    if with_store(|s|s.wait(id,WAIT_OTHER,0,0,clock(),&DONE,true)).is_none(){
++        DONE[i].gap_id.store(id,Ordering::Relaxed);DROPPED.fetch_add(1,Ordering::Relaxed);
++    }
 +}
 +#[cfg(feature="mem_report")]
 +pub(crate) fn begin_read(read:&super::reactor::ActiveRead)->u64 {
