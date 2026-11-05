@@ -1,8 +1,8 @@
-name: AMPR diagnostic 0.1.0
+name: AMPR diagnostic 0.2.0
 
 'on':
   push:
-    branches: ['codex/ampr-diagnostics-0.1.0']
+    branches: ['codex/ampr-diagnostics-0.2.0']
     paths: ['ampr-diagnostics/**', '.github/workflows/ampr-diagnostic.yml']
   workflow_dispatch:
 
@@ -12,6 +12,10 @@ permissions:
 concurrency:
   group: ampr-diagnostic-${{ github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   verified-sprx:
@@ -50,20 +54,20 @@ jobs:
         working-directory: upstream
         run: |
           cargo test --workspace --locked 2>&1 | tee ../dist/host-tests.log
-          cargo test -p ampr-sys diagnostic_storage_budget -- --nocapture 2>&1 | tee ../dist/storage.log
+          cargo test -p ampr-sys rt::diag::tests -- --nocapture 2>&1 | tee ../dist/storage.log
       - name: Build and verify release and diagnostic SPRX
         working-directory: upstream
-        run: ./ps5/build-docker.sh dist AMPR_GIT_REV="${GITHUB_SHA}-diag01" 2>&1 | tee ../dist/build.log
+        run: ./ps5/build-docker.sh dist AMPR_GIT_REV="${GITHUB_SHA}-diag02" 2>&1 | tee ../dist/build.log
       - name: Package verified diagnostic binary and complete corresponding source
         run: |
-          cp upstream/libSceAmpr-debug.sprx dist/libSceAmpr-diag-0.1.0.sprx
+          cp upstream/libSceAmpr-debug.sprx dist/libSceAmpr-diag-0.2.0.sprx
           cp build-config/ampr-diagnostics/diagnostics.patch dist/
           tar --exclude=.git --exclude=out --exclude=target --exclude='*.sprx' -czf dist/ampr-emu-ng-diagnostic-source.tar.gz -C upstream .
           python3 - <<'PY'
           import hashlib,json,os,pathlib
           root=pathlib.Path('dist')
-          binary=root/'libSceAmpr-diag-0.1.0.sprx'
-          info={'name':'ampr-emu-ng diagnostic','diagnostic_version':'0.1.0','protocol':1,
+          binary=root/'libSceAmpr-diag-0.2.0.sprx'
+          info={'name':'ampr-emu-ng diagnostic','diagnostic_version':'0.2.0','protocol':2,
                 'upstream_commit':'cd0c11efeedec45f2ed01715ff33c00898d40240',
                 'build_commit':os.environ['GITHUB_SHA'],'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
                 'host_tests_passed':True,'prx_sprx_verifier_passed':True,
@@ -75,7 +79,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ampr-diagnostic-0.1.0-${{ github.run_number }}
+          name: ampr-diagnostic-0.2.0-${{ github.run_number }}
           path: dist/*
           retention-days: 30
           if-no-files-found: error
+
