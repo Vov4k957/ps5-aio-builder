@@ -31,7 +31,7 @@ The first 15 fields retain protocol 1 meanings. fd/result are signed. Path is at
 most 96 bytes. `event` adds seq at_ns previous_stage_ns ended before the item.
 An ended record is a completion summary; intermediate tiny transitions are not
 an exhaustive trace. Slow wait transitions (at least 100 ms on the old reason)
-are retained. Endings at least 50 ms (job), 20 ms (sampled APR), 10 ms (sampled
+are retained; their item describes the reason being closed. Endings at least 50 ms (job), 20 ms (sampled APR), 10 ms (sampled
 pread), failures, and one in 16 other endings are retained.
 
 wait_reason is only pre-first-read waiting: 0 none, 1 prior job in priority lane,

@@ -20,7 +20,7 @@ index b666748baabe24fc761782c01bb7da346925c218..f6ab1961506459cf2632eb486a345556
  # reads; the pool peak did not change with 16, 32 and 64 threads (debug
 diff --git a/crates/ampr-sys/src/rt/diag.rs b/crates/ampr-sys/src/rt/diag.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..acd45f57fc71561dd5e896eeb63a8f436429c73e
+index 0000000000000000000000000000000000000000..0f4862b03941f9fbf9541ba4173e427b7aa15974
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag.rs
 @@ -0,0 +1,419 @@
@@ -170,9 +170,9 @@ index 0000000000000000000000000000000000000000..acd45f57fc71561dd5e896eeb63a8f43
 +        let mut item=self.items[i];
 +        if reason>WAITS as u8||(item.wait_reason==reason&&item.wait_blocker==blocker&&item.wait_opcode==opcode){return;}
 +        item.gapped|=done[i].gap_id.load(Ordering::Relaxed)==id;
-+        let span=now.saturating_sub(item.wait_since_ns);Self::close_wait(&mut item,now);
++        let since=item.wait_since_ns;let span=now.saturating_sub(since);Self::close_wait(&mut item,now);
++        if span>=100_000_000{let mut closed=item;closed.wait_since_ns=since;self.push(closed,now,span,false);}
 +        item.wait_reason=reason;item.wait_blocker=blocker;item.wait_opcode=opcode;
-+        if span>=100_000_000{self.push(item,now,span,false);}
 +        self.items[i]=item;
 +    }
 +    fn change(&mut self,id:u64,stage:u8,result:i64,now:u64,ended:bool,done:&[Completion;A]) {
@@ -396,7 +396,7 @@ index 0000000000000000000000000000000000000000..acd45f57fc71561dd5e896eeb63a8f43
 +        s.wait(id,WAIT_PRIOR,899,0,2,&d,false);s.wait(id,WAIT_GAME,0,31,200_000_002,&d,false);
 +        assert!(d[(id%8)as usize].complete(id,JOB_RELEASED,-5,400_000_002));s.reap(&d,8);
 +        let mut ev=[Event::EMPTY;8];let(_,n,lost)=s.event_page(0,&mut ev);
-+        assert_eq!((n,lost),(2,0));assert_eq!(ev[0].item.source_job,900);
++        assert_eq!((n,lost),(2,0));assert_eq!(ev[0].item.source_job,900);assert_eq!(ev[0].item.wait_reason,WAIT_PRIOR);assert_eq!(ev[0].item.wait_blocker,899);
 +        assert!(ev[1].ended);assert_eq!(ev[1].item.result,-5);assert_eq!(ev[1].item.wait_ns[0],200_000_000);
 +    }
 +    #[test]fn filtered_history_and_ring_loss_have_separate_counters(){
@@ -426,7 +426,7 @@ index 0000000000000000000000000000000000000000..acd45f57fc71561dd5e896eeb63a8f43
 +        assert_eq!(history.hist[30].iter().sum::<u64>(),completed.load(Ordering::Relaxed));
 +        println!("diagnostic concurrent stress: attempts=200000 completed={} stale=0",history.reaped);
 +    }
-+    #[test]fn ten_minute_load_keeps_releasing_slots(){
++    #[test]fn million_endings_keep_releasing_slots(){
 +        let mut s=Store::<128,64>::new();let d=done();
 +        for n in 1..=1_000_000{let id=s.begin(item(n),n*1000,&d);assert_ne!(id,0);
 +            assert!(d[(id%128)as usize].complete(id,READ_REMOVED,0,n*1000+20));}
@@ -440,7 +440,7 @@ index 0000000000000000000000000000000000000000..acd45f57fc71561dd5e896eeb63a8f43
 +    #[test]fn diagnostic_routes_and_bounds(){
 +        assert_eq!(query(b"/metrics"),None);assert_eq!(query(b"/diag/active?cursor=20&limit=4"),Some(Query::Active(20,4)));
 +        assert_eq!(query(b"/diag/events?after=9000000000&limit=64"),Some(Query::Events(9000000000,64)));
-+        for target in [b"/diag/events?after=-1"as &[u8],b"/diag/active?cursor=1025",b"/diag/active?limit=0",b"/diag/events?after=1&after=2",b"/diag/info?set=1"]{assert_eq!(query(target),Some(Query::Invalid));}
++        for target in [b"/diag/events?after=-1" as &[u8],b"/diag/active?cursor=1025",b"/diag/active?limit=0",b"/diag/events?after=1&after=2",b"/diag/info?set=1"]{assert_eq!(query(target),Some(Query::Invalid));}
 +    }
 +}
 diff --git a/crates/ampr-sys/src/rt/exports.rs b/crates/ampr-sys/src/rt/exports.rs
