@@ -1,29 +1,29 @@
 diff --git a/Makefile b/Makefile
-index b666748baabe24fc761782c01bb7da346925c218..f6ab1961506459cf2632eb486a34555639789f00 100644
+index b666748baabe24fc761782c01bb7da346925c218..6bccf53294a751207f59a48a39281fea4e0ef6b1 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -27,6 +27,15 @@ AMPR_INTERNAL_POOL_SIZE ?= 0x8000000
  # memory. Profiles bigger than the release config no longer fit: a decoded
  # cache above the 16 MiB default halves down to 16 MiB, then is off (see
  # pack_decoded_cache_bytes in /metrics).
-+# Diagnostic 0.2.0 debug-only storage (rt/diag.rs): 1024 active entries,
-+# 4096 filtered history events, completion publication atomics and histograms.
-+# Exact host size_of is printed/asserted by diagnostic_storage_budget (<2 MiB).
-+# Completion publication does not acquire the history lock. APR reads are
-+# sampled 1/16 and pread tasks 1/64, before diagnostic path lookup.
-+# HTTP buffers remain 64 KiB each; snapshot scratch is 64 Items/Events + bins.
-+# diagId remains 8 B per debug JobState, ActiveRead and PreadTask.
-+# Statics are outside the unchanged pool. New console CPU/frame and memory
-+# peaks require console validation; host/CI results do not measure them.
++# Diagnostic 0.3.0 debug-only storage: unchanged lifecycle ring and
++# independently try-locked lane-head history (1024 point samples, 100 ms gate).
++# Completion atomics add a last-block command tag/timestamp, 16 B per slot.
++# JobState/ActiveRead/PreadTask retain the same diagId fields as 0.2.0.
++# Exact Store+Completion and Head/Row/store sizes are printed by host tests;
++# tests assert their combined static allocation stays below 2 MiB.
++# HTTP head scratch: 64 Rows, plus the existing 64 Items/Events and hist bins.
++# Pool and scheduler/read knobs are unchanged. Console CPU/frame cost and
++# live memory peaks require a new console run and have not been measured.
  AMPR_DEBUG_POOL_SIZE ?= $(AMPR_INTERNAL_POOL_SIZE)
  # Release pread threads 16 -> 32 (tune::RELEASE_PREAD_THREADS) for split loose
  # reads; the pool peak did not change with 16, 32 and 64 threads (debug
 diff --git a/crates/ampr-sys/src/rt/diag.rs b/crates/ampr-sys/src/rt/diag.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280dfc428966
+index 0000000000000000000000000000000000000000..86874ac5914076f6631d8b846be9a07952420ac3
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag.rs
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,479 @@
 +//! Bounded debug diagnostics. Completion publication is independent of the
 +//! history lock; a busy HTTP reader cannot leave a finished operation active.
 +//! Read lifecycles are sampled before path lookup. History keeps slow endings
@@ -93,12 +93,12 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +// Slot identity includes a generation. Only a successful ACTIVE -> WRITING
 +// CAS may publish an ending; a late/duplicate finish cannot touch a reused slot.
 +struct Completion {
-+    state:AtomicU64,at:AtomicU64,result:AtomicI64,stage:AtomicU64,gap_id:AtomicU64,wait_key:AtomicU64,
++    state:AtomicU64,at:AtomicU64,result:AtomicI64,stage:AtomicU64,gap_id:AtomicU64,wait_key:AtomicU64,block_key:AtomicU64,block_since:AtomicU64,
 +}
 +impl Completion {
 +    const fn new()->Self {Self {state:AtomicU64::new(0),at:AtomicU64::new(0),
-+        result:AtomicI64::new(0),stage:AtomicU64::new(0),gap_id:AtomicU64::new(0),wait_key:AtomicU64::new(0)}}
-+    fn activate(&self,id:u64) {self.gap_id.store(0,Ordering::Relaxed);self.wait_key.store(0,Ordering::Relaxed);self.state.store((id<<2)|1,Ordering::Release);}
++        result:AtomicI64::new(0),stage:AtomicU64::new(0),gap_id:AtomicU64::new(0),wait_key:AtomicU64::new(0),block_key:AtomicU64::new(0),block_since:AtomicU64::new(0)}}
++    fn activate(&self,id:u64) {self.block_key.store(0,Ordering::Relaxed);self.block_since.store(0,Ordering::Relaxed);self.gap_id.store(0,Ordering::Relaxed);self.wait_key.store(0,Ordering::Relaxed);self.state.store((id<<2)|1,Ordering::Release);}
 +    fn complete(&self,id:u64,stage:u8,result:i64,now:u64)->bool {
 +        if self.state.compare_exchange((id<<2)|1,(id<<2)|2,Ordering::Acquire,Ordering::Relaxed).is_err(){return false;}
 +        self.at.store(now,Ordering::Relaxed);self.result.store(result,Ordering::Relaxed);
@@ -110,6 +110,17 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +        Some((self.stage.load(Ordering::Relaxed)as u8,self.result.load(Ordering::Relaxed),self.at.load(Ordering::Relaxed)))
 +    }
 +    fn live(&self,id:u64)->bool {self.state.load(Ordering::Acquire)==((id<<2)|1)}
++    fn observe_block(&self,id:u64,command:u32,reason:u8,opcode:u8,clock:impl FnOnce()->u64)->bool {
++        if !self.live(id){return false;}
++        let key=((command as u64)<<16)|((opcode as u64)<<8)|reason as u64;
++        if self.block_key.load(Ordering::Relaxed)==key{return true;}
++        self.block_since.store(clock(),Ordering::Relaxed);self.block_key.store(key,Ordering::Release);true
++    }
++    fn clear_block(&self,id:u64){if self.live(id){self.block_key.store(0,Ordering::Release);self.block_since.store(0,Ordering::Relaxed);}}
++    fn current_block(&self,id:u64,command:u32)->(u64,u64){
++        if !self.live(id){return (0,0);}let key=self.block_key.load(Ordering::Acquire);
++        if key!=0&&(key>>16)==command as u64{(key,self.block_since.load(Ordering::Relaxed))}else{(0,0)}
++    }
 +}
 +
 +pub(crate) struct Store<const A:usize,const E:usize> {
@@ -254,8 +265,27 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +    if !DONE[i].complete(id,stage,result,clock()){return;}
 +    if with_store(|s|s.reap_slot(i,&DONE)).is_none(){DEFERRED.fetch_add(1,Ordering::Relaxed);}
 +}
++// The block tag follows the command cursor after the first read too. Only
++// the reactor writes a live job's tag; it does not need the history lock.
++#[cfg(feature="mem_report")]
++pub(crate) fn job_block(job:&super::reactor::JobState,reason:u8,opcode:u8) {
++    if job.diagId==0{return;}let id=job.diagId;let i=(id%ACTIVE_CAP as u64)as usize;
++    let _=DONE[i].observe_block(id,job.sourceCommandIndex,reason,opcode,clock);
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn job_progress(job:&super::reactor::JobState) {
++    if job.diagId!=0{let id=job.diagId;DONE[(id%ACTIVE_CAP as u64)as usize].clear_block(id);}
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn block_state(job:&super::reactor::JobState)->(u64,u64) {
++    if job.diagId==0{return (0,0);}let id=job.diagId;
++    DONE[(id%ACTIVE_CAP as u64)as usize].current_block(id,job.sourceCommandIndex)
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn boot_ns()->u64{BOOT_NS.load(Ordering::Relaxed)}
 +#[cfg(feature="mem_report")]
 +pub(crate) fn job_wait(job:&super::reactor::JobState,reason:u8,blocker:u64,opcode:u8) {
++    job_block(job,reason,opcode);
 +    if job.statAcceptNs==0||job.diagId==0{return;}
 +    let id=job.diagId;let i=(id%ACTIVE_CAP as u64)as usize;
 +    // Repeated checks on the same blocked command do not acquire the store
@@ -267,6 +297,8 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +}
 +#[cfg(feature="mem_report")]
 +pub(crate) fn job_enter(job:&super::reactor::JobState) {
++    let (key,_)=block_state(job);
++    if (key&255)==WAIT_PRIOR as u64 || (key!=0 && (key>>16)!=job.sourceCommandIndex as u64) {job_progress(job);}
 +    if job.statAcceptNs==0||job.diagId==0{return;}
 +    let id=job.diagId;let i=(id%ACTIVE_CAP as u64)as usize;
 +    if !DONE[i].live(id)||(DONE[i].wait_key.load(Ordering::Relaxed)>>32)!=WAIT_PRIOR as u64{return;}
@@ -330,7 +362,7 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +/// Deliberately exact routes. An invalid diagnostic request must not fall
 +/// through to /metrics, whose resetting maxima would then be consumed.
 +#[derive(Clone,Copy,Debug,PartialEq,Eq)]
-+pub(crate) enum Query {Info, Active(usize,usize), Events(u64,usize), Hist, Invalid}
++pub(crate) enum Query {Info, Active(usize,usize), Events(u64,usize), Heads(u64,usize), Hist, Invalid}
 +pub(crate) fn query(target:&[u8])->Option<Query> {
 +    if !target.starts_with(b"/diag") {return None;}
 +    let at=target.iter().position(|&b|b==b'?').unwrap_or(target.len());
@@ -347,12 +379,13 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +        for &b in value {if !b.is_ascii_digit(){return Some(Query::Invalid);}
 +            let Some(n)=number.checked_mul(10).and_then(|n|n.checked_add((b-b'0')as u64)) else{return Some(Query::Invalid);};number=n;}
 +        if key==b"limit" && !seen_limit {if number==0||number>PAGE as u64{return Some(Query::Invalid);}limit=number as usize;seen_limit=true;}
-+        else if ((route==b"/diag/active"&&key==b"cursor")||(route==b"/diag/events"&&key==b"after")) && !seen_cursor {cursor=number;seen_cursor=true;}
++        else if ((route==b"/diag/active"&&key==b"cursor")||((route==b"/diag/events"||route==b"/diag/heads")&&key==b"after")) && !seen_cursor {cursor=number;seen_cursor=true;}
 +        else{return Some(Query::Invalid);}
 +    }
 +    Some(match route {
 +        b"/diag/active" if cursor<=ACTIVE_CAP as u64=>Query::Active(cursor as usize,limit),
 +        b"/diag/events"=>Query::Events(cursor,limit),
++        b"/diag/heads"=>Query::Heads(cursor,limit),
 +        _=>Query::Invalid,
 +    })
 +}
@@ -441,6 +474,25 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +        s.reap(&d,128);assert_eq!(s.active,0);assert_eq!(s.reaped,1_000_000);
 +        assert_eq!(s.hist[30].iter().sum::<u64>(),1_000_000);assert_eq!(s.table_skips,0);
 +    }
++    #[test]fn block_observation_survives_first_read_without_extending_pre_read_time(){
++        let mut s=Store::<8,16>::new();let d=done();let id=s.begin(Item{id:1,kind:JOB,stage:JOB_ACCEPTED,..Item::EMPTY},100,&d);
++        s.wait(id,WAIT_PRIOR,99,0,200,&d,false);s.change(id,JOB_ISSUED,0,1200,false,&d);
++        let i=(id%8)as usize;let before=s.items[i].wait_ns;
++        assert!(d[i].observe_block(id,5,WAIT_READS,2,||2000));
++        let(key,since)=d[i].current_block(id,5);assert_eq!(key&255,WAIT_READS as u64);assert_eq!(since,2000);
++        assert_eq!(s.items[i].wait_ns,before);assert_eq!(d[i].current_block(id,6),(0,0));
++    }
++    #[test]fn unchanged_block_does_not_read_clock_or_acquire_history(){
++        let d=Completion::new();d.activate(77);assert!(d.observe_block(77,3,WAIT_GAME,0,||100));
++        for _ in 0..10000{assert!(d.observe_block(77,3,WAIT_GAME,0,||panic!("unchanged observation read the clock")));}
++        d.clear_block(77);assert_eq!(d.current_block(77,3),(0,0));
++    }
++    #[test]fn late_block_cannot_overwrite_a_reused_generation(){
++        let d=Completion::new();d.activate(1);assert!(d.complete(1,JOB_RELEASED,0,1));
++        d.state.store(0,Ordering::Release);d.activate(2);assert!(d.observe_block(2,3,WAIT_READS,2,||20));
++        assert!(!d.observe_block(1,4,WAIT_GAME,0,||panic!("late observer read clock")));d.clear_block(1);
++        assert_eq!(d.current_block(2,3).1,20);
++    }
 +    #[test]fn diagnostic_storage_budget(){
 +        println!("diag storage v2: Item={} Event={} Store+Completion={} bytes",core::mem::size_of::<Item>(),core::mem::size_of::<Event>(),STORE_BYTES);
 +        assert!(STORE_BYTES<2*1024*1024);assert_eq!(core::mem::align_of::<Item>(),8);
@@ -451,8 +503,148 @@ index 0000000000000000000000000000000000000000..1220c0998ba99dbb85fc8c2d2b17280d
 +        for target in [b"/diag/events?after=-1" as &[u8],b"/diag/active?cursor=1025",b"/diag/active?limit=0",b"/diag/events?after=1&after=2",b"/diag/info?set=1"]{assert_eq!(query(target),Some(Query::Invalid));}
 +    }
 +}
+diff --git a/crates/ampr-sys/src/rt/diag_heads.rs b/crates/ampr-sys/src/rt/diag_heads.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e2969a031dc941f999c0bf717ef8f2c48302ba9
+--- /dev/null
++++ b/crates/ampr-sys/src/rt/diag_heads.rs
+@@ -0,0 +1,134 @@
++//! Reactor-owned lane-head observations, independent of lifecycle history.
++//! Samples are points in time, not frame timings or a proof that a condition
++//! held between samples. The HTTP thread reads copies and never reads jobs.
++use core::sync::atomic::{AtomicBool,AtomicU64,Ordering};
++use super::sync::SyncCell;
++
++pub(crate) const PROTOCOL:u64=1;
++pub(crate) const LANES:usize=super::reactor::PRIO_N;
++pub(crate) const CAP:usize=1024;
++pub(crate) const PERIOD_NS:u64=100_000_000;
++pub(crate) const PAGE:usize=64;
++
++#[derive(Clone,Copy,Debug,Default)]
++pub(crate) struct Head {
++    pub(crate) lane:u32,pub(crate) source_job:u64,pub(crate) diag_id:u64,
++    pub(crate) observed_ns:u64,pub(crate) first_seen_ns:u64,pub(crate) contiguous:u32,
++    pub(crate) block_reason:u32,pub(crate) block_since_ns:u64,pub(crate) block_opcode:u32,
++    pub(crate) command_index:u32,pub(crate) command_count:u32,
++    pub(crate) source_offset:u32,pub(crate) source_bytes:u32,pub(crate) cursor_opcode:u32,
++    pub(crate) flags:u32,
++    pub(crate) active_reads:u32,pub(crate) read_seq_latest:u64,pub(crate) read_seq_completed:u64,
++    pub(crate) native_opcode:u32,pub(crate) native_retry_at_ns:u64,
++    pub(crate) file_id:u32,pub(crate) fd:i32,pub(crate) file_offset:u64,pub(crate) read_bytes:u64,
++    pub(crate) read_submit_ns:u64,pub(crate) read_flags:u32,
++    pub(crate) chain_active_reads:u32,pub(crate) chain_active_bytes:u64,pub(crate) chain_retry_at_ns:u64,
++    pub(crate) pread_queued:u32,pub(crate) pread_running:u32,pub(crate) pread_pending:u32,pub(crate) pread_threads:u32,
++}
++impl Head {
++    pub(crate) const EMPTY:Self=Self {lane:0,source_job:0,diag_id:0,observed_ns:0,first_seen_ns:0,contiguous:0,
++        block_reason:0,block_since_ns:0,block_opcode:0,command_index:0,command_count:0,
++        source_offset:0,source_bytes:0,cursor_opcode:256,flags:0,
++        active_reads:0,read_seq_latest:0,read_seq_completed:0,native_opcode:0,native_retry_at_ns:0,
++        file_id:0,fd:-1,file_offset:0,read_bytes:0,read_submit_ns:0,read_flags:0,
++        chain_active_reads:0,chain_active_bytes:0,chain_retry_at_ns:0,
++        pread_queued:0,pread_running:0,pread_pending:0,pread_threads:0};
++}
++#[derive(Clone,Copy,Debug)]
++pub(crate) struct Row {pub(crate) seq:u64,pub(crate) head:Head}
++impl Row {pub(crate) const EMPTY:Self=Self {seq:0,head:Head::EMPTY};}
++
++struct Store<const L:usize,const C:usize> {last:[Head;L],rows:[Row;C],next:u64,samples:u64}
++impl<const L:usize,const C:usize> Store<L,C> {
++    const fn new()->Self{Self {last:[Head::EMPTY;L],rows:[Row::EMPTY;C],next:1,samples:0}}
++    fn observe(&mut self,heads:&[Head;L],now:u64){
++        self.samples=self.samples.saturating_add(1);
++        for (lane,input) in heads.iter().enumerate(){
++            let previous=self.last[lane];let mut h=*input;h.lane=lane as u32;h.observed_ns=now;
++            if h.source_job==0&&previous.source_job==0{continue;}
++            let close=now>=previous.observed_ns&&now-previous.observed_ns<=PERIOD_NS*3;
++            if h.source_job!=0&&h.source_job==previous.source_job&&close {
++                h.first_seen_ns=previous.first_seen_ns;h.contiguous=1;
++            }else{h.first_seen_ns=now;h.contiguous=0;}
++            if C!=0{let seq=self.next;self.rows[((seq-1)%C as u64)as usize]=Row {seq,head:h};self.next=self.next.saturating_add(1);}
++            self.last[lane]=h;
++        }
++    }
++    fn oldest(&self)->u64{self.next.saturating_sub(C as u64).max(1)}
++    fn page(&self,after:u64,out:&mut [Row])->(u64,usize,u64){
++        let wanted=after.saturating_add(1);let first=wanted.max(self.oldest());let lost=self.oldest().saturating_sub(wanted);
++        let mut n=0;let mut seq=first;
++        while seq<self.next&&n<out.len(){let row=self.rows[((seq-1)%C as u64)as usize];if row.seq==seq{out[n]=row;n+=1;}seq+=1;}
++        (if n>0{out[n-1].seq}else{after},n,lost)
++    }
++}
++struct Gate {next:AtomicU64}
++impl Gate {
++    const fn new()->Self{Self {next:AtomicU64::new(0)}}
++    fn take(&self,now:u64)->bool {
++        let next=self.next.load(Ordering::Relaxed);if now<next{return false;}
++        self.next.compare_exchange(next,now.saturating_add(PERIOD_NS),Ordering::Relaxed,Ordering::Relaxed).is_ok()
++    }
++}
++static GATE:Gate=Gate::new();
++static LOCK:AtomicBool=AtomicBool::new(false);
++static DROPPED:AtomicU64=AtomicU64::new(0);
++static DATA:SyncCell<Store<LANES,CAP>>=SyncCell::new(Store::new());
++struct Guard;
++impl Drop for Guard{fn drop(&mut self){LOCK.store(false,Ordering::Release);}}
++fn with_store<T>(f:impl FnOnce(&mut Store<LANES,CAP>)->T)->Option<T>{
++    if LOCK.compare_exchange(false,true,Ordering::Acquire,Ordering::Relaxed).is_err(){return None;}
++    let _guard=Guard;Some(f(unsafe{&mut *DATA.get()}))
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn due(now:u64)->bool{GATE.take(now)}
++#[cfg(feature="mem_report")]
++pub(crate) fn publish(heads:&[Head;LANES],now:u64){
++    if with_store(|s|s.observe(heads,now)).is_none(){DROPPED.fetch_add(1,Ordering::Relaxed);}
++}
++#[derive(Clone,Copy)]
++pub(crate) struct Header {pub(crate) now:u64,pub(crate) boot:u64,pub(crate) busy:bool,
++    pub(crate) dropped:u64,pub(crate) samples:u64,pub(crate) oldest:u64,pub(crate) next:u64}
++#[cfg(feature="mem_report")]
++pub(crate) fn snapshot(after:u64,out:&mut [Row])->(Header,u64,usize,u64){
++    let now=super::stats::now();let boot=super::diag::boot_ns();let dropped=DROPPED.load(Ordering::Relaxed);
++    with_store(|s|{let(next,n,lost)=s.page(after,out);
++        (Header{now,boot,busy:false,dropped,samples:s.samples,oldest:s.oldest(),next:s.next},next,n,lost)})
++        .unwrap_or((Header{now,boot,busy:true,dropped,samples:0,oldest:0,next:0},after,0,0))
++}
++pub(crate) const STORE_BYTES:usize=core::mem::size_of::<Store<LANES,CAP>>();
++
++#[cfg(test)]mod tests {
++    use super::*;
++    fn h(job:u64)->Head{Head{source_job:job,..Head::EMPTY}}
++    #[test]fn stable_head_is_sampled_after_its_first_read(){
++        let mut s=Store::<1,8>::new();let mut head=h(7);head.flags=64;head.block_reason=6;head.active_reads=4;
++        s.observe(&[head],100);s.observe(&[head],PERIOD_NS+100);
++        let mut rows=[Row::EMPTY;8];let(_,n,lost)=s.page(0,&mut rows);
++        assert_eq!((n,lost),(2,0));assert_eq!(rows[1].head.first_seen_ns,100);
++        assert_eq!(rows[1].head.contiguous,1);assert_eq!(rows[1].head.block_reason,6);assert_eq!(rows[1].head.active_reads,4);
++    }
++    #[test]fn a_gap_or_new_head_does_not_invent_continuous_occupation(){
++        let mut s=Store::<1,8>::new();s.observe(&[h(1)],100);s.observe(&[h(1)],PERIOD_NS*4);
++        assert_eq!(s.last[0].first_seen_ns,PERIOD_NS*4);assert_eq!(s.last[0].contiguous,0);
++        s.observe(&[h(2)],PERIOD_NS*5);assert_eq!(s.last[0].first_seen_ns,PERIOD_NS*5);
++    }
++    #[test]fn idle_transition_is_kept_but_idle_heartbeats_are_not_flooded(){
++        let mut s=Store::<1,8>::new();s.observe(&[Head::EMPTY],1);assert_eq!(s.next,1);
++        s.observe(&[h(7)],2);s.observe(&[Head::EMPTY],3);s.observe(&[Head::EMPTY],4);
++        assert_eq!(s.next,3);assert_eq!(s.last[0].source_job,0);
++    }
++    #[test]fn ring_overwrite_and_pagination_remain_explicit(){
++        let mut s=Store::<1,3>::new();for n in 1..=10{s.observe(&[h(n)],n);}
++        let mut rows=[Row::EMPTY;2];let(next,n,lost)=s.page(0,&mut rows);assert_eq!((next,n,lost),(9,2,7));
++        let(next,n,lost)=s.page(next,&mut rows);assert_eq!((next,n,lost),(10,1,0));
++    }
++    #[test]fn gate_caps_sampling_without_sleeping(){
++        let gate=Gate::new();assert!(gate.take(1));for n in 2..1000{assert!(!gate.take(n));}
++        assert!(gate.take(PERIOD_NS+1));assert!(!gate.take(1));
++    }
++    #[test]fn head_store_has_a_bounded_memory_budget(){
++        println!("head storage: Head={} Row={} Store={} lanes={}",core::mem::size_of::<Head>(),core::mem::size_of::<Row>(),STORE_BYTES,LANES);
++        assert!(STORE_BYTES<384*1024);assert!(STORE_BYTES+super::super::diag::STORE_BYTES<2*1024*1024);
++    }
++}
 diff --git a/crates/ampr-sys/src/rt/exports.rs b/crates/ampr-sys/src/rt/exports.rs
-index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd22345c7ab32 100644
+index d030558bda1fdaa6148fdfde72f9eb02406ffba5..c02ef45543050a639922b15f3ba83dc774e735eb 100644
 --- a/crates/ampr-sys/src/rt/exports.rs
 +++ b/crates/ampr-sys/src/rt/exports.rs
 @@ -387,30 +387,33 @@ mod mem_report {
@@ -494,16 +686,17 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd223
              self.buf[self.len..self.len + n].copy_from_slice(&s[..n]);
              self.len += n;
              self
-@@ -441,6 +444,103 @@ mod mem_report {
+@@ -441,6 +444,157 @@ mod mem_report {
          }
      }
  
 +    // ---- bounded diagnostic protocol v2 -----------------------------------
 +    // Scratch belongs only to the HTTP thread; game threads only copy into
 +    // the independent try-locked store, never format or send network data.
-+    use super::super::diag;
++    use super::super::{diag,diag_heads};
 +    static mut DIAG_ITEMS: [diag::Item; diag::PAGE] = [diag::Item::EMPTY; diag::PAGE];
 +    static mut DIAG_EVENTS: [diag::Event; diag::PAGE] = [diag::Event::EMPTY; diag::PAGE];
++    static mut HEAD_ROWS:[diag_heads::Row;diag_heads::PAGE]=[diag_heads::Row::EMPTY;diag_heads::PAGE];
 +    static mut DIAG_HIST: [[u64; diag::BINS]; diag::STAGES] = [[0; diag::BINS]; diag::STAGES];
 +
 +    impl Text {
@@ -529,8 +722,48 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd223
 +            self.s(b" ").path_hex(&item.path[..item.path_len as usize]);
 +            self
 +        }
++        fn head_row(&mut self,row:&diag_heads::Row)->&mut Self {
++            let h=&row.head;self.s(b"head ").u(row.seq);
++            self.s(b" ").u(h.lane as u64);
++            self.s(b" ").u(h.source_job as u64);
++            self.s(b" ").u(h.diag_id as u64);
++            self.s(b" ").u(h.observed_ns as u64);
++            self.s(b" ").u(h.first_seen_ns as u64);
++            self.s(b" ").u(h.contiguous as u64);
++            self.s(b" ").u(h.block_reason as u64);
++            self.s(b" ").u(h.block_since_ns as u64);
++            self.s(b" ").u(h.block_opcode as u64);
++            self.s(b" ").u(h.command_index as u64);
++            self.s(b" ").u(h.command_count as u64);
++            self.s(b" ").u(h.source_offset as u64);
++            self.s(b" ").u(h.source_bytes as u64);
++            self.s(b" ").u(h.cursor_opcode as u64);
++            self.s(b" ").u(h.flags as u64);
++            self.s(b" ").u(h.active_reads as u64);
++            self.s(b" ").u(h.read_seq_latest as u64);
++            self.s(b" ").u(h.read_seq_completed as u64);
++            self.s(b" ").u(h.native_opcode as u64);
++            self.s(b" ").u(h.native_retry_at_ns as u64);
++            self.s(b" ").u(h.file_id as u64);
++            self.s(b" ").signed(h.fd as i64);
++            self.s(b" ").u(h.file_offset as u64);
++            self.s(b" ").u(h.read_bytes as u64);
++            self.s(b" ").u(h.read_submit_ns as u64);
++            self.s(b" ").u(h.read_flags as u64);
++            self.s(b" ").u(h.chain_active_reads as u64);
++            self.s(b" ").u(h.chain_active_bytes as u64);
++            self.s(b" ").u(h.chain_retry_at_ns as u64);
++            self.s(b" ").u(h.pread_queued as u64);
++            self.s(b" ").u(h.pread_running as u64);
++            self.s(b" ").u(h.pread_pending as u64);
++            self.s(b" ").u(h.pread_threads as u64);
++            let mut path=[0u8;diag::PATH+1];
++            let n=if h.read_flags&33!=0{super::super::index::probe_file_path(h.file_id,&mut path).unwrap_or(0)}else{0};
++            self.s(b" ").u((n==diag::PATH)as u64).s(b" ").path_hex(&path[..n]);
++            self.s(b"\n")
++        }
 +        fn diag_header(&mut self, h:diag::Header)->&mut Self {
-+            self.s(b"ampr_diag ").u(diag::PROTOCOL).s(b"\ndiag_build 0.2.0\n")
++            self.s(b"ampr_diag ").u(diag::PROTOCOL).s(b"\ndiag_build 0.3.0\n")
 +                .s(b"upstream cd0c11efeedec45f2ed01715ff33c00898d40240\n")
 +                .s(b"build ").s(super::BUILD_REV.as_bytes()).s(b"\n")
 +                .kv("boot_ns",h.boot_ns).kv("now_ns",h.now_ns).kv("busy",h.busy as u64)
@@ -543,7 +776,8 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd223
 +                .kv("completion_deferred",h.deferred).kv("completion_reaped",h.reaped)
 +                .kv("events_filtered",h.filtered).kv("sample_job_every",1)
 +                .kv("sample_read_every",diag::READ_EVERY).kv("sample_pread_every",diag::PREAD_EVERY)
-+                .kv("seen_jobs",h.seen[0]).kv("seen_reads",h.seen[1]).kv("seen_preads",h.seen[2]);
++                .kv("seen_jobs",h.seen[0]).kv("seen_reads",h.seen[1]).kv("seen_preads",h.seen[2])
++                .kv("head_protocol",diag_heads::PROTOCOL).kv("head_store_bytes",diag_heads::STORE_BYTES as u64);
 +            self
 +        }
 +    }
@@ -574,6 +808,18 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd223
 +                }
 +                out.s(b"end ").u(n as u64).s(b"\n");
 +            }
++            diag::Query::Heads(after,limit)=>{
++                let rows=unsafe{&mut *core::ptr::addr_of_mut!(HEAD_ROWS)};
++                let(h,next,n,lost)=diag_heads::snapshot(after,&mut rows[..limit]);
++                out.s(b"ampr_heads 1\ndiag_build 0.3.0\n").s(b"build ").s(super::BUILD_REV.as_bytes()).s(b"\n")
++                    .kv("boot_ns",h.boot).kv("now_ns",h.now).kv("busy",h.busy as u64)
++                    .kv("producer_dropped",h.dropped).kv("samples",h.samples)
++                    .kv("sample_period_ns",diag_heads::PERIOD_NS).kv("event_capacity",diag_heads::CAP as u64)
++                    .kv("lane_count",diag_heads::LANES as u64).kv("oldest_seq",h.oldest).kv("next_seq",h.next)
++                    .kv("after",after).kv("next_after",next).kv("lost_before_page",lost).kv("rows",n as u64);
++                for row in &rows[..n]{out.head_row(row);}
++                out.s(b"end ").u(n as u64).s(b"\n");
++            }
 +            diag::Query::Hist=>{
 +                let hist=unsafe {&mut *core::ptr::addr_of_mut!(DIAG_HIST)};
 +                let h=diag::histogram_snapshot(hist);out.diag_header(h);
@@ -598,17 +844,18 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd223
      const KIB: usize = 1024;
      const MIB: usize = 1024 * KIB;
      /// Deepest AIO queue the bench runs (aio_256k_qd32); bench_args::fit
-@@ -1003,7 +1103,8 @@ mod mem_report {
+@@ -1003,7 +1157,9 @@ mod mem_report {
              .s(b" ")
              .s(super::BUILD_FLAVOR.as_bytes())
              .s(b"\n");
 -        out.kv("uptime_ns", monotonic_ns().saturating_sub(start_ns))
 +        out.kv("diag_protocol", diag::PROTOCOL)
++            .kv("diag_heads_protocol",diag_heads::PROTOCOL)
 +            .kv("uptime_ns", monotonic_ns().saturating_sub(start_ns))
              .kv("pool_used_bytes", used as u64)
              .kv("pool_peak_bytes", peak as u64)
              .kv("pool_size_bytes", size as u64)
-@@ -1131,6 +1232,7 @@ mod mem_report {
+@@ -1131,6 +1287,7 @@ mod mem_report {
      }
  
      unsafe fn serve(listener: c_int, start_ns: u64) -> ! {
@@ -616,7 +863,7 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd223
          loop {
              let client = unsafe { accept(listener, core::ptr::null_mut(), core::ptr::null_mut()) };
              if client < 0 {
-@@ -1144,7 +1246,9 @@ mod mem_report {
+@@ -1144,7 +1301,9 @@ mod mem_report {
              let (text, metrics) = unsafe { &mut *core::ptr::addr_of_mut!(BUFS) };
              text.len = 0;
              metrics.len = 0;
@@ -628,15 +875,17 @@ index d030558bda1fdaa6148fdfde72f9eb02406ffba5..a3b9062004a8359243373c94872dd223
              } else if n > 0 && req[..n as usize].starts_with(b"GET /set") {
                  unsafe { set(&req[..n as usize], metrics) };
 diff --git a/crates/ampr-sys/src/rt/mod.rs b/crates/ampr-sys/src/rt/mod.rs
-index d7cd1c94741fa944a37928e57f606b0a8f24b5fd..48994e87ad90bcaff5f369af7b170bc87f1e2b33 100644
+index d7cd1c94741fa944a37928e57f606b0a8f24b5fd..fb53aa9ac7c5ff809167da48cd853ed88192c9de 100644
 --- a/crates/ampr-sys/src/rt/mod.rs
 +++ b/crates/ampr-sys/src/rt/mod.rs
-@@ -4,6 +4,8 @@ mod amm;
+@@ -4,6 +4,10 @@ mod amm;
  #[cfg(feature = "mem_report")]
  mod blackbox;
  mod command_buffer;
 +#[cfg(any(test, feature = "mem_report"))]
 +pub(crate) mod diag;
++#[cfg(any(test, feature = "mem_report"))]
++pub(crate) mod diag_heads;
  mod equeue;
  pub(crate) mod exports;
  mod fd_cache;
@@ -653,11 +902,71 @@ index e9bd7ea5c1cb32efb77326e3c6b954956128ed8b..60a58d64f66c7355754c7acb919f4330
          active.submitTimeNs = submitTimeNs;
          active.retryNotBeforeNs = 0;
          if accountSubmit {
+diff --git a/crates/ampr-sys/src/rt/reactor/diagnostic_heads.rs b/crates/ampr-sys/src/rt/reactor/diagnostic_heads.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..57554cd6de9a616f77567b3043f6ecb8589989aa
+--- /dev/null
++++ b/crates/ampr-sys/src/rt/reactor/diagnostic_heads.rs
+@@ -0,0 +1,54 @@
++//! Scalar lane-head copies made by the reactor under its existing job lock.
++//! The observer never polls completion, evaluates game memory, or changes a
++//! scheduler decision. Paths are resolved later on the HTTP thread.
++use super::*;
++use crate::rt::{diag,diag_heads};
++impl AprAioReactor {
++    pub(crate) fn diag_capture_heads(&self,heads:&[JobPtr;PRIO_N],now:u64){
++        let mut output=[diag_heads::Head::EMPTY;PRIO_N];
++        let mut queued=0;let mut running=0;
++        for task in &self.preadTasks{match task.state.load(Ordering::Acquire){PREAD_QUEUED=>queued+=1,PREAD_RUNNING=>running+=1,_=>{}}}
++        for (lane,&pointer) in heads.iter().enumerate(){
++            let h=&mut output[lane];h.lane=lane as u32;
++            h.pread_queued=queued;h.pread_running=running;
++            h.pread_pending=self.preadPendingCount;h.pread_threads=self.preadThreadCount as u32;
++            let Some(j)=(unsafe{pointer.as_ref()})else{continue;};
++            h.source_job=j.id;h.diag_id=j.diagId;h.command_index=j.sourceCommandIndex;h.command_count=j.commandCount;
++            h.source_offset=j.sourceOffset;h.source_bytes=j.sourceBytes;
++            h.active_reads=j.activeReadCount;h.read_seq_latest=j.latestSubmittedReadSeq;h.read_seq_completed=j.completedReadSeq;
++            h.native_opcode=j.nativeSourceType as u32;h.native_retry_at_ns=j.nativeSubmitRetryAtNs;
++            if j.nativeSubmitted.load(Ordering::Acquire){h.flags|=1;}
++            if j.nativeBatchReleasePending{h.flags|=2;}
++            let native=&self.nativeBatchLanes[lane];
++            if native.blockingWaitSequence!=0&&!Self::native_batch_sequence_reached(native.completedSequence,native.blockingWaitSequence){h.flags|=4;}
++            if j.failed.load(Ordering::Acquire){h.flags|=8;}
++            if j.processingComplete{h.flags|=16;}
++            if j.decodedOpCacheBytes!=0&&j.decodedOpCache.buf_offset_bytes==j.sourceOffset {
++                h.flags|=32;h.cursor_opcode=j.decodedOpCache.op_type as u32;
++            }
++            if j.statAcceptNs==0{h.flags|=64;}
++            if j.sourceOffset==j.sourceBytes{h.flags|=128;}
++            if !j.priorityNext.load(Ordering::Acquire).is_null(){h.flags|=256;}
++            if j.diagId==0{h.flags|=512;}
++            let(key,since)=diag::block_state(j);
++            h.block_reason=if key==0{8}else{(key&255)as u32};h.block_since_ns=since;h.block_opcode=((key>>8)&255)as u32;
++            if let Some(chain)=unsafe{j.cursorReadChain.as_ref()}{
++                h.chain_active_reads=chain.activeCount;h.chain_active_bytes=chain.activeBytes;h.chain_retry_at_ns=chain.retryNotBeforeNs;
++                h.file_id=chain.ownerDesc.fileId;h.fd=chain.ownerDesc.fd;h.file_offset=chain.ownerDesc.offset;
++                h.read_bytes=chain.ownerDesc.length;h.read_flags|=32;
++            }
++            if let Some(slot)=self.activeReads.slots_.get(j.activeReadHead as usize){
++                if slot.active&&slot.value.job==pointer{
++                    let read=&slot.value;
++                    h.file_id=read.desc.fileId;h.fd=read.desc.fd;h.file_offset=read.desc.offset;h.read_bytes=read.desc.length;
++                    h.read_submit_ns=read.statSubmitNs;h.read_flags=1;
++                    if read.submitAccounted{h.read_flags|=2;}
++                    if read.preadQueued{h.read_flags|=4;}
++                    if read.awaitingResubmit{h.read_flags|=8;}
++                    if read.awaitingBatchSubmit{h.read_flags|=16;}
++                }
++            }
++        }
++        diag_heads::publish(&output,now);
++    }
++}
 diff --git a/crates/ampr-sys/src/rt/reactor/flush.rs b/crates/ampr-sys/src/rt/reactor/flush.rs
-index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..09435c7c25c8692753c283bebc63cfd55a0feef0 100644
+index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..6325f3c4e123d49896e5a11d5d8564637b0c3ae0 100644
 --- a/crates/ampr-sys/src/rt/reactor/flush.rs
 +++ b/crates/ampr-sys/src/rt/reactor/flush.rs
-@@ -328,6 +328,8 @@ impl AprAioReactor {
+@@ -328,11 +328,15 @@ impl AprAioReactor {
          }
          if !issueBudget.can_admit(sliceCreditBytes) {
              issueBudget.held = true;
@@ -666,7 +975,14 @@ index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..09435c7c25c8692753c283bebc63cfd5
              return PENDING;
          }
          let nowNs = Self::aio_admission_lane_now(admission);
-@@ -347,6 +349,8 @@ impl AprAioReactor {
+         if chain.retryNotBeforeNs != 0 {
+             if nowNs < chain.retryNotBeforeNs {
++                #[cfg(feature = "mem_report")]
++                crate::rt::diag::job_block(jobRef, 9, 0);
+                 return PENDING;
+             }
+             chain.retryNotBeforeNs = 0;
+@@ -347,6 +351,8 @@ impl AprAioReactor {
          {
              self.note_adaptive_read_window_blocked(readWindow.mode);
              stats::add(Stat::ReadActiveHeld, 1);
@@ -675,7 +991,7 @@ index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..09435c7c25c8692753c283bebc63cfd5
              return PENDING;
          }
          if !self.direct_read_admission_available(
-@@ -357,6 +361,8 @@ impl AprAioReactor {
+@@ -357,6 +363,8 @@ impl AprAioReactor {
              nowNs,
              admission,
          ) {
@@ -684,7 +1000,16 @@ index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..09435c7c25c8692753c283bebc63cfd5
              return PENDING;
          }
  
-@@ -431,6 +437,8 @@ impl AprAioReactor {
+@@ -373,6 +381,8 @@ impl AprAioReactor {
+             );
+             if !acquired {
+                 if apr_fd_acquire_sce_rc_is_deferred(acquireRc) {
++                    #[cfg(feature = "mem_report")]
++                    crate::rt::diag::job_block(jobRef, 10, 0);
+                     let failureNowNs = time_counter_now();
+                     if acquireRc == SCE_KERNEL_ERROR_EMFILE {
+                         self.note_emfile_event();
+@@ -431,6 +441,8 @@ impl AprAioReactor {
          active.nativeCapacityCharged = !unsafe { ampr_pack_is_virtual_fd(active.request.fd) };
  
          active.aioPrio = apr_aio_priority_from_apr(jobRef.prioIndex);
@@ -694,10 +1019,19 @@ index fd52b871c7ddd85c33c6de31dbd7fb75c1c9b28b..09435c7c25c8692753c283bebc63cfd5
          self.stage_aio_submit(active, false);
          // Park the chain until the end-of-pass multiple-submit accepts this
 diff --git a/crates/ampr-sys/src/rt/reactor/job_state.rs b/crates/ampr-sys/src/rt/reactor/job_state.rs
-index 50e541d72a379fb7dde23061be317e5a1f6cb27d..ce050d039d50508f9daf0aa21e617ceb30f661bb 100644
+index 50e541d72a379fb7dde23061be317e5a1f6cb27d..a5c1c75465c02d5c24ecaa1d4f06c4a898688e0c 100644
 --- a/crates/ampr-sys/src/rt/reactor/job_state.rs
 +++ b/crates/ampr-sys/src/rt/reactor/job_state.rs
-@@ -422,6 +422,11 @@ impl JobState {
+@@ -133,6 +133,8 @@ impl AprAioReactor {
+         job.sourceOffset += opBytes;
+         job.sourceCommandIndex += commandCount;
+         Self::clear_decoded_op(job);
++        #[cfg(feature = "mem_report")]
++        crate::rt::diag::job_progress(job);
+     }
+ 
+     pub(crate) fn advance_job_source(job: &mut JobState, opBytes: u32) {
+@@ -422,6 +424,11 @@ impl JobState {
          #[cfg(feature = "mem_report")]
          {
              self.statAcceptNs = crate::rt::stats::now();
@@ -709,16 +1043,18 @@ index 50e541d72a379fb7dde23061be317e5a1f6cb27d..ce050d039d50508f9daf0aa21e617ceb
          }
      }
  
-@@ -430,6 +435,8 @@ impl JobState {
+@@ -430,6 +437,10 @@ impl JobState {
      /// job_first_issue_ns.
      #[inline(always)]
      pub(crate) fn stat_read_issued(&mut self) {
++        #[cfg(feature = "mem_report")]
++        crate::rt::diag::job_progress(self);
 +        #[cfg(feature = "mem_report")]
 +        crate::rt::diag::change(self.diagId, crate::rt::diag::JOB_ISSUED);
          #[cfg(feature = "mem_report")]
          let start = core::mem::take(&mut self.statAcceptNs);
          #[cfg(not(feature = "mem_report"))]
-@@ -446,6 +453,8 @@ impl JobState {
+@@ -446,6 +457,8 @@ impl JobState {
      /// (backoff.rs mark_seq_complete): starts or restarts job_notify_ns.
      #[inline(always)]
      pub(crate) fn stat_read_done(&mut self) {
@@ -727,10 +1063,12 @@ index 50e541d72a379fb7dde23061be317e5a1f6cb27d..ce050d039d50508f9daf0aa21e617ceb
          #[cfg(feature = "mem_report")]
          {
              self.statReadDoneNs = crate::rt::stats::now();
-@@ -457,6 +466,8 @@ impl JobState {
+@@ -457,6 +470,10 @@ impl JobState {
      /// job_notify_ns if a read completed since the last notify.
      #[inline(always)]
      pub(crate) fn stat_notified(&mut self) {
++        #[cfg(feature = "mem_report")]
++        crate::rt::diag::job_progress(self);
 +        #[cfg(feature = "mem_report")]
 +        crate::rt::diag::change(self.diagId, crate::rt::diag::JOB_NOTIFIED);
          #[cfg(feature = "mem_report")]
@@ -750,10 +1088,19 @@ index 2df4990e1fa101d7904906eb1a3a36bbb20424e2..7aac968370dbee518d1a1a4d148fb453
                      active.statSubmitNs = 0;
                      stats::add(Stat::AprReads, 1);
 diff --git a/crates/ampr-sys/src/rt/reactor/mod.rs b/crates/ampr-sys/src/rt/reactor/mod.rs
-index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..5db9d78d0794099ff32c91ee6e5fddab0661d753 100644
+index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..349f040e78b11eafeb82df7f915c87cc1df99432 100644
 --- a/crates/ampr-sys/src/rt/reactor/mod.rs
 +++ b/crates/ampr-sys/src/rt/reactor/mod.rs
-@@ -1084,6 +1084,8 @@ zeroed_default!(GatherScatterState, SyntheticWaitSlot);
+@@ -40,6 +40,8 @@ mod native;
+ mod poll_deadline;
+ mod pools;
+ mod progress;
++#[cfg(feature = "mem_report")]
++mod diagnostic_heads;
+ mod read_window;
+ mod setup;
+ mod software;
+@@ -1084,6 +1086,8 @@ zeroed_default!(GatherScatterState, SyntheticWaitSlot);
  
  pub(crate) struct JobState {
      pub(crate) id: u64,
@@ -762,7 +1109,7 @@ index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..5db9d78d0794099ff32c91ee6e5fddab
      pub(crate) sourceBuffer: *const u8,
      pub(crate) sourceBytes: u32,
      pub(crate) sourceOffset: u32,
-@@ -1195,6 +1197,8 @@ impl JobStateSlot {
+@@ -1195,6 +1199,8 @@ impl JobStateSlot {
  
  #[derive(Clone, Copy)]
  pub(crate) struct ActiveRead {
@@ -771,7 +1118,7 @@ index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..5db9d78d0794099ff32c91ee6e5fddab
      pub(crate) job: JobPtr,
      pub(crate) desc: AprAioReadDesc,
      pub(crate) chain: *mut ReadChain,
-@@ -1588,6 +1592,8 @@ pub(crate) const PREAD_DONE: u32 = 3;
+@@ -1588,6 +1594,8 @@ pub(crate) const PREAD_DONE: u32 = 3;
  /// or retires a slot; a pool thread claims it under preadMutex and publishes
  /// completion with Release.
  pub(crate) struct PreadTask {
@@ -781,7 +1128,7 @@ index 0b67d1b99c3877446bbd35c562303f39b7de4d1a..5db9d78d0794099ff32c91ee6e5fddab
      pub(crate) request: SceKernelAioRWRequest,
      pub(crate) targetSlot: u32,
 diff --git a/crates/ampr-sys/src/rt/reactor/native.rs b/crates/ampr-sys/src/rt/reactor/native.rs
-index e7b92141fcd56bd8dc0f97b3a58376434115b062..fd05a5f4b81f029a007a643a40554f126966e052 100644
+index e7b92141fcd56bd8dc0f97b3a58376434115b062..6d46ae53a9607e952f75babfa68b8ac852a79c11 100644
 --- a/crates/ampr-sys/src/rt/reactor/native.rs
 +++ b/crates/ampr-sys/src/rt/reactor/native.rs
 @@ -436,10 +436,16 @@ impl AprAioReactor {
@@ -819,7 +1166,31 @@ index e7b92141fcd56bd8dc0f97b3a58376434115b062..fd05a5f4b81f029a007a643a40554f12
              return self.retry_native_amm_micro(j!(job)) || progressed;
          }
          if j!(job).sourceOffset != sourceOffsetAtEntry {
-@@ -921,6 +931,8 @@ impl AprAioReactor {
+@@ -852,10 +862,14 @@ impl AprAioReactor {
+                 return CommandFlow::Stop;
+             }
+             Self::cache_decoded_op(jb, op, opBytes);
++            #[cfg(feature = "mem_report")]
++            crate::rt::diag::job_block(jb, crate::rt::diag::WAIT_READS, op.op_type);
+             *progressed = true;
+             return CommandFlow::Stop;
+         }
+         if readFencePending && !Self::software_op_is_sop(op) {
++            #[cfg(feature = "mem_report")]
++            crate::rt::diag::job_block(jb, crate::rt::diag::WAIT_READS, op.op_type);
+             Self::cache_decoded_op(jb, op, opBytes);
+             return CommandFlow::Stop;
+         }
+@@ -864,6 +878,8 @@ impl AprAioReactor {
+                 && !Self::software_op_uses_native_apr_batch(op.op_type))
+                 || op.op_type == WRITE_EQUEUE)
+         {
++            #[cfg(feature = "mem_report")]
++            crate::rt::diag::job_block(jb, crate::rt::diag::WAIT_NATIVE, op.op_type);
+             Self::cache_decoded_op(jb, op, opBytes);
+             return CommandFlow::Stop;
+         }
+@@ -921,6 +937,8 @@ impl AprAioReactor {
          }
          if !softwareAddressComplete {
              if op.op_type == WAIT_ON_ADDRESS {
@@ -905,10 +1276,30 @@ index a33c034ca435ca466cd9231726f173bf1ccfb17d..1d42315339d809396cabee2f572bc364
          }
          self.preadPendingCount += requests.len() as u32;
 diff --git a/crates/ampr-sys/src/rt/reactor/progress.rs b/crates/ampr-sys/src/rt/reactor/progress.rs
-index ca52c325441053ce0cfd9ffe1073a98264faee4f..8adb3b6af9352a80e677908d64d17702776f3b1a 100644
+index ca52c325441053ce0cfd9ffe1073a98264faee4f..4981e47baa8320db399ce62472af46128d1d72eb 100644
 --- a/crates/ampr-sys/src/rt/reactor/progress.rs
 +++ b/crates/ampr-sys/src/rt/reactor/progress.rs
-@@ -42,6 +42,8 @@ impl AprAioReactor {
+@@ -10,6 +10,10 @@ impl AprAioReactor {
+         self.begin_aio_submit_round();
+         let mut laneHeads: [JobPtr; PRIO_N] = [null_mut(); PRIO_N];
+         let mut laneDemandMask: u8 = 0;
++        #[cfg(feature = "mem_report")]
++        let head_sample_now = crate::rt::stats::now();
++        #[cfg(feature = "mem_report")]
++        let head_sample_due = crate::rt::diag_heads::due(head_sample_now);
+         {
+             let _lk = self.m.lock();
+             for lane in 0..PRIO_N {
+@@ -18,6 +22,8 @@ impl AprAioReactor {
+                     laneDemandMask |= (1u32 << lane) as u8;
+                 }
+             }
++            #[cfg(feature = "mem_report")]
++            if head_sample_due { self.diag_capture_heads(&laneHeads, crate::rt::stats::now()); }
+         }
+         admission.laneDemandMask = laneDemandMask;
+         progressed |= self.stage_external_aio_submits(&mut admission, true);
+@@ -42,6 +48,8 @@ impl AprAioReactor {
              let mut job = laneHeads[lane];
              while !job.is_null() {
                  if self.native_batch_wait_pending(lane as u32) {
@@ -917,7 +1308,7 @@ index ca52c325441053ce0cfd9ffe1073a98264faee4f..8adb3b6af9352a80e677908d64d17702
                      if unsafe { !(*job).priorityNext.load(Ordering::Acquire).is_null() } {
                          lane_overlap::note_lane_block(lane_overlap::LaneBlock::Wait);
                      }
-@@ -559,6 +561,8 @@ impl AprAioReactor {
+@@ -559,6 +567,8 @@ impl AprAioReactor {
          terminal: bool,
          nowNs: u64,
      ) {
@@ -926,7 +1317,7 @@ index ca52c325441053ce0cfd9ffe1073a98264faee4f..8adb3b6af9352a80e677908d64d17702
          let (submitNs, lastPollNs, polls, bytes, ext) =
              if let Some(e) = unsafe { external.as_mut() } {
                  let i = requestIndex as usize;
-@@ -593,6 +597,8 @@ impl AprAioReactor {
+@@ -593,6 +603,8 @@ impl AprAioReactor {
          if *submitNs == 0 {
              return;
          }

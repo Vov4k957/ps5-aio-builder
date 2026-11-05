@@ -1,4 +1,4 @@
-# AMPR diagnostic protocol 2 (diagnostic 0.2.0)
+# AMPR diagnostic protocol 2 (diagnostic 0.3.0)
 
 Read-only HTTP routes on port 9090: /diag/info, /diag/active?cursor=0&limit=64,
 /diag/events?after=0&limit=64, /diag/hist. These never reset /metrics maxima.
@@ -57,3 +57,74 @@ Completion slot identities include a generation and are atomically claimed.
 A late or duplicate ending cannot finish a new operation reusing that slot.
 No producer spins or waits on the history lock; no diagnostic network calls run
 on game threads. This does not establish zero console overhead.
+
+
+# Optional lane-head protocol 1 (diagnostic 0.3.0)
+
+The lifecycle protocol stays 2, preserving old captures. /metrics advertises
+`diag_heads_protocol 1` and /diag/info advertises `head_protocol 1`.
+New PC collector 1.8.0 queries /diag/heads?after=0&limit=64. This route is read-only
+and cannot fall through to /metrics or reset any maxima.
+
+Response starts `ampr_heads 1`, then diag_build/build, boot_ns, now_ns, busy,
+producer_dropped, samples, sample_period_ns, event_capacity, lane_count,
+oldest_seq, next_seq, after, next_after, lost_before_page, rows. It ends
+`end ROW_COUNT`. Limit is at most 64 rows. Cursor loss means overwritten rows;
+producer_dropped counts skipped entire head snapshots, independently of the
+lifecycle store's counters. A busy page has no rows and keeps its old cursor.
+
+Each row is `head SEQUENCE` followed by these decimal fields and path hex:
+
+lane source_job diag_id observed_ns first_seen_ns contiguous
+block_reason block_since_ns block_opcode command_index command_count source_offset
+source_bytes cursor_opcode flags active_reads read_seq_latest read_seq_completed
+native_opcode native_retry_at_ns file_id fd file_offset read_bytes
+read_submit_ns read_flags chain_active_reads chain_active_bytes chain_retry_at_ns pread_queued
+pread_running pread_pending pread_threads path_truncated path_hex
+
+fd is signed, all other integers unsigned. path_truncated is 0/1, path is at
+most 96 bytes. Names are resolved on the HTTP thread from file_id, never while
+holding the reactor mutex. No buffer or synchronization-memory addresses are exported.
+
+The reactor copies its actual priority-lane heads under its existing mutex,
+roughly every 100 ms. It observes flags and cursors; it never polls native
+completion or evaluates game synchronization memory for diagnostics. Pread
+queued/running counts are global, from sequential atomic state loads, not CPU
+load and not an atomic whole-pool snapshot. Idle lanes only emit a transition
+when a previously observed head becomes absent; empty heartbeats are filtered.
+The ring has 1024 rows. Its time coverage depends on active lane count.
+
+flags bits: 1 nativeSubmitted, 2 nativeBatchReleasePending, 4 native lane wait
+sequence not completed, 8 job failed, 16 processingComplete, 32 cached cursor
+opcode valid, 64 first read already issued, 128 source cursor at end,
+256 successor queued, 512 no admitted lifecycle diagnostic handle.
+cursor_opcode is 256 when not known. Native opcode is meaningful with its
+native pending flags, not necessarily the current cursor command.
+
+read_flags: 1 first linked unfinished read copied, 2 submit accounted,
+4 pread queued, 8 awaiting resubmit, 16 awaiting initial batch submit,
+32 read-chain descriptor only (not evidence of an in-flight I/O request).
+When bit 1 is set, file/offset/bytes refer to one unfinished read; other reads
+of the head are not listed by this row. Chain counts/bytes describe the cursor
+chain. read_submit_ns=0 means unknown. Retry timestamps may be time-counter
+values or internal sentinel values; never subtract them from monotonic now_ns.
+
+block_reason codes 1..8 have the same labels as lifecycle pre-first-read
+waiting, but this independent tag continues after the first read. Codes 9 and
+10 mean read-chain retry delay and indexed-FD acquisition deferred. Zero means
+no recorded block, 8 is unclassified. block_since_ns is the time the reactor
+last observed that exact command/reason pair at a stop branch. Progress clears
+the tag; skipped lifecycle history changes do not drop this independent tag.
+A cursor mismatch invalidates an older tag. Flags describe observed state;
+existence of unfinished reads alone does not prove that the head waits on them.
+
+first_seen_ns is the first retained sample of this head, not exact promotion
+time. contiguous=1 means the same job was observed with a sample gap at most
+300 ms; a longer gap or new job resets first_seen_ns. Samples do not prove a
+condition held continuously between observations. The PC must not extend a
+sample to the end of a freeze marker or treat it as frame timing.
+
+Two stores are independently try-locked. Producers never wait for HTTP and
+no diagnostic field changes scheduling, completion publication or read knobs.
+Combined bounded storage is measured/asserted by host tests. Console overhead
+and behavior still require console validation.
