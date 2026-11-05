@@ -20,7 +20,7 @@ index b666748baabe24fc761782c01bb7da346925c218..f6ab1961506459cf2632eb486a345556
  # reads; the pool peak did not change with 16, 32 and 64 threads (debug
 diff --git a/crates/ampr-sys/src/rt/diag.rs b/crates/ampr-sys/src/rt/diag.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0f4862b03941f9fbf9541ba4173e427b7aa15974
+index 0000000000000000000000000000000000000000..00ee1f966933cb735b4a07335aed455705d183bd
 --- /dev/null
 +++ b/crates/ampr-sys/src/rt/diag.rs
 @@ -0,0 +1,419 @@
@@ -254,10 +254,10 @@ index 0000000000000000000000000000000000000000..0f4862b03941f9fbf9541ba4173e427b
 +    if with_store(|s|s.reap_slot(i,&DONE)).is_none(){DEFERRED.fetch_add(1,Ordering::Relaxed);}
 +}
 +#[cfg(feature="mem_report")]
-+pub(crate) fn job_wait(job:&super::reactor::JobState,reason:u8,blocker:u64,opcode:u32) {
++pub(crate) fn job_wait(job:&super::reactor::JobState,reason:u8,blocker:u64,opcode:u8) {
 +    if job.statAcceptNs==0||job.diagId==0{return;}
 +    let id=job.diagId;let i=(id%ACTIVE_CAP as u64)as usize;
-+    if with_store(|s|s.wait(id,reason,blocker,opcode,clock(),&DONE,false)).is_none(){
++    if with_store(|s|s.wait(id,reason,blocker,opcode as u32,clock(),&DONE,false)).is_none(){
 +        DONE[i].gap_id.store(id,Ordering::Relaxed);DROPPED.fetch_add(1,Ordering::Relaxed);
 +    }
 +}
