@@ -1,26 +1,27 @@
-AMPR diagnostic 0.3.0 — наблюдение за головными заданиями очереди
+AMPR diagnostic 0.4.0 - ready handoff candidate
 
-Файл PS5: libSceAmpr-diag-0.3.0.sprx. Основа ampr-emu-ng 0.3.0,
-commit cd0c11efeedec45f2ed01715ff33c00898d40240, GPL-3.0-or-later.
-Полный соответствующий исходный код включён в комплект.
+Based on quer3q/ampr-emu-ng 0.3.0 at cd0c11efeedec45f2ed01715ff33c00898d40240.
+GPL-3.0-or-later; complete corresponding source and patch are packaged.
 
-Добавлен отдельный журнал головных заданий по приоритетным очередям:
-примерно 100 мс между наблюдениями; кольцо 1024 строк; до 64 строк в ответе.
-В снимке: текущая команда, позиция в буфере, незавершённые чтения,
-последовательности чтений, native-флаги и причина остановки после первого чтения.
-Также передаётся пример незавершённого чтения с файлом/смещением и число
-queued/running задач pread. Это глобальные счётчики, не загрузка CPU.
+Changes from diagnostic 0.3.0:
+- After a head is fully released, its successor may run in the same pass.
+- At most eight ready handoffs per lane/pass; the read budget is shared.
+- No bypass of a blocked head or of its read/native completion fences.
+- Recheck pread completions before the cursor pass only if pending work
+  exists and the reactor wake epoch changed since the first drain.
+- Measure pread DONE publication -> reactor observation for every part.
+- Existing diagnostic protocols remain 2 (lifecycle) and 1 (lane heads).
+- Pool, read limits, priority policy, thread counts and FW patches unchanged.
 
-Завершения и основная выборка 0.2.0 сохранены. Дополнительная история имеет
-собственные потери/курсор и не заполняет основное кольцо мелкими событиями.
-Снимки снимает поток реактора под уже используемым mutex; форматирование и
-поиск имени файла выполняет HTTP-поток. Игровые команды и настройки чтения
-не меняются. Влияние новой диагностики на PS5 ещё требует реального прогона.
+Use lane_eop_overlap=0 (baseline A). The earlier B profile did not remove
+cutscene freezes. Reset that profile before evaluating this candidate.
+This is a code optimization candidate, not a confirmed freeze fix.
 
-Сборщик: PS5 Lag Diagnostics 1.8.0. Обычный протокол 2 совместим с предыдущей
-версией; новый endpoint /diag/heads включается по объявленному head_protocol=1.
-Основной новый отчёт — AMPR_HEADS_RU.txt. Полная история — ampr_diag_heads.txt.
+Debug-only memory growth: 128 publication stamps x 8 B + 8 counters x 8 B
+= 1088 B outside the unchanged 128 MiB pool. Exact layouts are printed by
+host tests. CPU overhead, FPS and console live memory peaks are unmeasured.
 
-Пробел–R по-прежнему обозначает участок с отдельными фризами и подгрузками,
-а не непрерывное зависание. Снимок головы очереди не измеряет FPS и не доказывает
-причину визуального фриза. Подробности формата и ограничений — PROTOCOL.md.
+The PC collector 1.9.0 records the extra counters and the new observation
+latency stage. Older collectors retain raw metrics but lack its averages.
+Replacing the library requires a full game close and a ShadowMount scan
+with emulator cache update. Never replace it while the game is running.
