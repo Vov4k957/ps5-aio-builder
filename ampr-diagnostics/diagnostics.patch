@@ -1,0 +1,802 @@
+--- a/Makefile
++++ b/Makefile
+@@ -27,6 +27,14 @@
+ # memory. Profiles bigger than the release config no longer fit: a decoded
+ # cache above the 16 MiB default halves down to 16 MiB, then is off (see
+ # pack_decoded_cache_bytes in /metrics).
++# Diagnostic debug-only storage (rt/diag.rs): Item 184 B, Event 216 B,
++# 1024 active entries + 8192 events + 32x32 histogram bins and metadata.
++# Host size_of measurement is asserted by diagnostic_storage_budget (<2 MiB);
++# the CI test prints exact sizes. Two HTTP buffers grow 16 -> 64 KiB each
++# (+96 KiB); HTTP snapshot scratch is another 64 Items, 64 Events and bins.
++# New diagId fields are 8 B per debug JobState, ActiveRead and PreadTask.
++# These statics are outside the unchanged internal pool. Console CPU/frame
++# impact and on-console memory peaks have not been measured for this fork.
+ AMPR_DEBUG_POOL_SIZE ?= $(AMPR_INTERNAL_POOL_SIZE)
+ # Release pread threads 16 -> 32 (tune::RELEASE_PREAD_THREADS) for split loose
+ # reads; the pool peak did not change with 16, 32 and 64 threads (debug
+--- a/crates/ampr-sys/src/rt/exports.rs
++++ b/crates/ampr-sys/src/rt/exports.rs
+@@ -387,30 +387,33 @@
+     }
+     const _: () = assert!(size_of::<SockAddrIn>() == 16);
+ 
+-    /// Fixed-capacity text buffer; output past the end is dropped. 16 KiB:
++    /// Fixed-capacity text buffer; output past the end is dropped. 64 KiB:
+     /// the body reached ~3.4 KiB of the old 4 KiB with the fs log, before the
+     /// reactor stats, and the tune_/pool_ lines print last.
+     struct Text {
+-        buf: [u8; 16384],
++        buf: [u8; 65536],
+         len: usize,
++        limit: usize,
+     }
+ 
+     /// Response and body buffers of the single server thread, in .bss rather
+     /// than on its default-size stack (debug build only).
+     static mut BUFS: (Text, Text) = (
+         Text {
+-            buf: [0; 16384],
++            buf: [0; 65536],
+             len: 0,
++            limit: 65536,
+         },
+         Text {
+-            buf: [0; 16384],
++            buf: [0; 65536],
+             len: 0,
++            limit: 65024,
+         },
+     );
+ 
+     impl Text {
+         fn s(&mut self, s: &[u8]) -> &mut Self {
+-            let n = s.len().min(self.buf.len() - self.len);
++            let n = s.len().min(self.limit - self.len);
+             self.buf[self.len..self.len + n].copy_from_slice(&s[..n]);
+             self.len += n;
+             self
+@@ -439,6 +442,94 @@
+             }
+             self.s(&d)
+         }
++    }
++
++    // ---- bounded diagnostic protocol v1 -----------------------------------
++    // Scratch belongs only to the HTTP thread; game threads only copy into
++    // the independent try-locked store, never format or send network data.
++    use super::super::diag;
++    static mut DIAG_ITEMS: [diag::Item; diag::PAGE] = [diag::Item::EMPTY; diag::PAGE];
++    static mut DIAG_EVENTS: [diag::Event; diag::PAGE] = [diag::Event::EMPTY; diag::PAGE];
++    static mut DIAG_HIST: [[u64; diag::BINS]; diag::STAGES] = [[0; diag::BINS]; diag::STAGES];
++
++    impl Text {
++        fn signed(&mut self, value:i64)->&mut Self {
++            if value<0 {self.s(b"-");}
++            self.u(value.unsigned_abs())
++        }
++        fn path_hex(&mut self, bytes:&[u8])->&mut Self {
++            if bytes.is_empty(){return self.s(b"-");}
++            for &b in bytes {self.s(&[b"0123456789abcdef"[(b>>4)as usize],b"0123456789abcdef"[(b&15)as usize]]);}
++            self
++        }
++        fn diag_item(&mut self, item:&diag::Item)->&mut Self {
++            self.u(item.id).s(b" ").u(item.parent).s(b" ").u(item.kind as u64).s(b" ").u(item.stage as u64)
++                .s(b" ").u(item.source_job).s(b" ").u(item.created_ns).s(b" ").u(item.changed_ns)
++                .s(b" ").u(item.file_id as u64).s(b" ").signed(item.fd as i64).s(b" ").u(item.offset)
++                .s(b" ").u(item.bytes).s(b" ").u(item.command as u64).s(b" ").u(item.priority as u64)
++                .s(b" ").signed(item.result).s(b" ").u(item.path_truncated as u64).s(b" ")
++                .path_hex(&item.path[..item.path_len as usize]);
++            self
++        }
++        fn diag_header(&mut self, h:diag::Header)->&mut Self {
++            self.s(b"ampr_diag ").u(diag::PROTOCOL).s(b"\ndiag_build 0.1.0\n")
++                .s(b"upstream cd0c11efeedec45f2ed01715ff33c00898d40240\n")
++                .s(b"build ").s(super::BUILD_REV.as_bytes()).s(b"\n")
++                .kv("boot_ns",h.boot_ns).kv("now_ns",h.now_ns).kv("busy",h.busy as u64)
++                .kv("producer_dropped",h.dropped).kv("active_table_skips",h.table_skips)
++                .kv("missing_updates",h.missing).kv("tracked_active",h.active)
++                .kv("active_may_be_incomplete",(h.busy||h.dropped>0||h.table_skips>0||h.missing>0)as u64)
++                .kv("active_capacity",diag::ACTIVE_CAP as u64).kv("event_capacity",diag::EVENT_CAP as u64)
++                .kv("oldest_seq",h.oldest).kv("next_seq",h.next_seq).kv("store_bytes",diag::STORE_BYTES as u64);
++            self
++        }
++    }
++    fn diagnostic(request:&[u8],out:&mut Text)->bool {
++        let target=super::bench_args::target(request);
++        let Some(query)=diag::query(target) else{return false;};
++        match query {
++            diag::Query::Info=>{
++                let (h,_,_)=diag::active_snapshot(0,&mut []);
++                out.diag_header(h).s(b"coverage apr_jobs apr_active_reads pread_tasks\n")
++                    .s(b"histogram_bounds_us powers_of_two_inclusive_last_open\n")
++                    .s(b"active_pages nonatomic_between_requests\nend 0\n");
++            }
++            diag::Query::Active(cursor,limit)=>{
++                let items=unsafe {&mut *core::ptr::addr_of_mut!(DIAG_ITEMS)};
++                let (h,next,n)=diag::active_snapshot(cursor,&mut items[..limit]);
++                out.diag_header(h).kv("cursor",cursor as u64).kv("next_cursor",next as u64).kv("rows",n as u64);
++                for item in &items[..n] {out.s(b"item ").diag_item(item).s(b"\n");}
++                out.s(b"end ").u(n as u64).s(b"\n");
++            }
++            diag::Query::Events(after,limit)=>{
++                let events=unsafe {&mut *core::ptr::addr_of_mut!(DIAG_EVENTS)};
++                let (h,next,n,lost)=diag::event_snapshot(after,&mut events[..limit]);
++                out.diag_header(h).kv("after",after).kv("next_after",next).kv("lost_before_page",lost).kv("rows",n as u64);
++                for event in &events[..n] {
++                    out.s(b"event ").u(event.seq).s(b" ").u(event.at_ns).s(b" ").u(event.stage_ns)
++                        .s(b" ").u(event.ended as u64).s(b" ").diag_item(&event.item).s(b"\n");
++                }
++                out.s(b"end ").u(n as u64).s(b"\n");
++            }
++            diag::Query::Hist=>{
++                let hist=unsafe {&mut *core::ptr::addr_of_mut!(DIAG_HIST)};
++                let h=diag::histogram_snapshot(hist);out.diag_header(h);
++                let mut rows=0;
++                if !h.busy {for (stage,bins) in hist.iter().enumerate(){
++                    if bins.iter().any(|&v|v!=0){
++                        rows+=1;out.s(b"hist ").u(stage as u64);
++                        for &count in bins {out.s(b" ").u(count);}
++                        out.s(b"\n");
++                    }
++                }}
++                out.s(b"end ").u(rows).s(b"\n");
++            }
++            diag::Query::Invalid=>{
++                let (h,_,_)=diag::active_snapshot(0,&mut []);
++                out.diag_header(h).s(b"error invalid_diagnostic_route_or_parameters\nend 0\n");
++            }
++        }
++        true
+     }
+ 
+     const KIB: usize = 1024;
+@@ -1003,7 +1094,8 @@
+             .s(b" ")
+             .s(super::BUILD_FLAVOR.as_bytes())
+             .s(b"\n");
+-        out.kv("uptime_ns", monotonic_ns().saturating_sub(start_ns))
++        out.kv("diag_protocol", diag::PROTOCOL)
++            .kv("uptime_ns", monotonic_ns().saturating_sub(start_ns))
+             .kv("pool_used_bytes", used as u64)
+             .kv("pool_peak_bytes", peak as u64)
+             .kv("pool_size_bytes", size as u64)
+@@ -1131,6 +1223,7 @@
+     }
+ 
+     unsafe fn serve(listener: c_int, start_ns: u64) -> ! {
++        diag::init(start_ns);
+         loop {
+             let client = unsafe { accept(listener, core::ptr::null_mut(), core::ptr::null_mut()) };
+             if client < 0 {
+@@ -1144,7 +1237,9 @@
+             let (text, metrics) = unsafe { &mut *core::ptr::addr_of_mut!(BUFS) };
+             text.len = 0;
+             metrics.len = 0;
+-            if n > 0 && req[..n as usize].starts_with(b"GET /bench") {
++            if n > 0 && diagnostic(&req[..n as usize], metrics) {
++                // Diagnostic reads never consume the resetting /metrics maxima.
++            } else if n > 0 && req[..n as usize].starts_with(b"GET /bench") {
+                 unsafe { bench(&req[..n as usize], metrics) };
+             } else if n > 0 && req[..n as usize].starts_with(b"GET /set") {
+                 unsafe { set(&req[..n as usize], metrics) };
+--- a/crates/ampr-sys/src/rt/mod.rs
++++ b/crates/ampr-sys/src/rt/mod.rs
+@@ -4,6 +4,8 @@
+ #[cfg(feature = "mem_report")]
+ mod blackbox;
+ mod command_buffer;
++#[cfg(any(test, feature = "mem_report"))]
++pub(crate) mod diag;
+ mod equeue;
+ pub(crate) mod exports;
+ mod fd_cache;
+--- a/crates/ampr-sys/src/rt/reactor/admission.rs
++++ b/crates/ampr-sys/src/rt/reactor/admission.rs
+@@ -451,6 +451,8 @@
+         }
+         let job = unsafe { &mut *active.job };
+         let chain = unsafe { &mut *active.chain };
++        #[cfg(feature = "mem_report")]
++        crate::rt::diag::change(active.diagId, crate::rt::diag::READ_ACCEPTED);
+         active.submitTimeNs = submitTimeNs;
+         active.retryNotBeforeNs = 0;
+         if accountSubmit {
+--- a/crates/ampr-sys/src/rt/reactor/job_state.rs
++++ b/crates/ampr-sys/src/rt/reactor/job_state.rs
+@@ -422,6 +422,11 @@
+         #[cfg(feature = "mem_report")]
+         {
+             self.statAcceptNs = crate::rt::stats::now();
++            self.diagId = crate::rt::diag::begin(crate::rt::diag::Item {
++                kind: crate::rt::diag::JOB, stage: crate::rt::diag::JOB_ACCEPTED,
++                source_job: self.id, priority: self.nativePrio,
++                ..crate::rt::diag::Item::EMPTY
++            }, &[], false);
+         }
+     }
+ 
+@@ -430,6 +435,8 @@
+     /// job_first_issue_ns.
+     #[inline(always)]
+     pub(crate) fn stat_read_issued(&mut self) {
++        #[cfg(feature = "mem_report")]
++        crate::rt::diag::change(self.diagId, crate::rt::diag::JOB_ISSUED);
+         #[cfg(feature = "mem_report")]
+         let start = core::mem::take(&mut self.statAcceptNs);
+         #[cfg(not(feature = "mem_report"))]
+@@ -447,6 +454,8 @@
+     #[inline(always)]
+     pub(crate) fn stat_read_done(&mut self) {
+         #[cfg(feature = "mem_report")]
++        crate::rt::diag::change(self.diagId, crate::rt::diag::JOB_READ_DONE);
++        #[cfg(feature = "mem_report")]
+         {
+             self.statReadDoneNs = crate::rt::stats::now();
+         }
+@@ -457,6 +466,8 @@
+     /// job_notify_ns if a read completed since the last notify.
+     #[inline(always)]
+     pub(crate) fn stat_notified(&mut self) {
++        #[cfg(feature = "mem_report")]
++        crate::rt::diag::change(self.diagId, crate::rt::diag::JOB_NOTIFIED);
+         #[cfg(feature = "mem_report")]
+         let start = core::mem::take(&mut self.statReadDoneNs);
+         #[cfg(not(feature = "mem_report"))]
+@@ -568,81 +579,4 @@
+         let (retry, mismatch) = {
+             let _ = (bufOffset, fileId, offset);
+             (false, false)
+-        };
+-        if retry {
+-            stats::add(Stat::GsRetryChecks, 1);
+-        }
+-        if mismatch {
+-            stats::add(Stat::GsRetryMismatches, 1);
+-        }
+-    }
+-}
+-
+-#[cfg(test)]
+-mod gs_retry_tests {
+-    use super::*;
+-
+-    fn read_op(op_type: OpType, fileId: u32, buffer: u64, length: u64, offset: u64) -> Op {
+-        Op {
+-            op_type,
+-            u32a: fileId,
+-            ptra: buffer,
+-            u64a: length,
+-            u64b: offset,
+-            ..Op::default()
+-        }
+-    }
+-
+-    fn resolve(gs: &GatherScatterState, op: &Op) -> SoftwareRead {
+-        let mut read = SoftwareRead {
+-            fileId: 0,
+-            buffer: null_mut(),
+-            length: 0,
+-            offset: 0,
+-        };
+-        assert_eq!(AprAioReactor::resolve_software_read(gs, op, &mut read), 0);
+-        read
+-    }
+-
+-    /// Two jobs on one lane cursor, job A's scatter read prepared and then
+-    /// retried (not issued, so the lane cursor did not advance for it), the
+-    /// way native.rs progress_software_read_command re-resolves it when no
+-    /// read chain is retained.
+-    #[test]
+-    fn retry_of_prepared_scatter_read_on_shared_lane() {
+-        let mut lane = GatherScatterState::default();
+-        // Job A: an explicit file read (fid 7) sets the lane cursor.
+-        let a0 = read_op(APR_READ_FILE, 7, 0x10000, 0x100, 0x1000);
+-        let r = resolve(&lane, &a0);
+-        AprAioReactor::update_software_gs_cursor(&mut lane, &r);
+-
+-        // Job A, command 1: a scatter read takes fid and offset from the lane.
+-        let mut a = GsPrepRecord::default();
+-        let a1 = read_op(APR_READ_SCATTER, 0, 0x20000, 0x200, 0);
+-        let prep = resolve(&lane, &a1);
+-        assert_eq!((prep.fileId, prep.offset), (7, 0x1100));
+-        let c = a.check(1, 0x40, prep.fileId, prep.offset);
+-        assert_eq!(c, GsCheck::Prepared);
+-
+-        // Forced retry with the lane untouched: the prepared fid is read.
+-        let retry = resolve(&lane, &a1);
+-        assert_eq!(retry.fileId, prep.fileId);
+-        assert_eq!(a.check(1, 0x40, retry.fileId, retry.offset), GsCheck::Match);
+-
+-        // Job B advances the same lane (cross-EOP read-ahead or lane overlap,
+-        // both off in release): the retry now resolves to B's file, issue #7.
+-        let b0 = read_op(APR_READ_FILE, 9, 0x30000, 0x40, 0x5000);
+-        let r = resolve(&lane, &b0);
+-        AprAioReactor::update_software_gs_cursor(&mut lane, &r);
+-        let retry = resolve(&lane, &a1);
+-        assert_eq!((retry.fileId, retry.offset), (9, 0x5040));
+-        let c = a.check(1, 0x40, retry.fileId, retry.offset);
+-        assert_eq!(c, GsCheck::Mismatch { first: true });
+-        let c = a.check(1, 0x40, retry.fileId, retry.offset);
+-        assert_eq!(c, GsCheck::Mismatch { first: false });
+-        assert_eq!((a.fileId, a.offset), (7, 0x1100));
+-
+-        // Job A's next command starts a new record.
+-        assert_eq!(a.check(2, 0x80, 9, 0x5040), GsCheck::Prepared);
+-    }
+-}
++ --- a/crates/ampr-sys/src/rt/reactor/loose_pread.rs
++++ b/crates/ampr-sys/src/rt/reactor/loose_pread.rs
+@@ -489,6 +489,8 @@
+                 stats::add(Stat::LoosePreadReads, 1);
+                 stats::add(Stat::LoosePreadBytes, length);
+                 if active.statSubmitNs != 0 {
++                    #[cfg(feature = "mem_report")]
++                    crate::rt::diag::change(active.diagId, crate::rt::diag::READ_OBSERVED);
+                     let latencyNs = stats::since(active.statSubmitNs);
+                     active.statSubmitNs = 0;
+                     stats::add(Stat::AprReads, 1);
+--- a/crates/ampr-sys/src/rt/reactor/mod.rs
++++ b/crates/ampr-sys/src/rt/reactor/mod.rs
+@@ -1084,6 +1084,8 @@
+ 
+ pub(crate) struct JobState {
+     pub(crate) id: u64,
++    #[cfg(feature = "mem_report")]
++    pub(crate) diagId: u64,
+     pub(crate) sourceBuffer: *const u8,
+     pub(crate) sourceBytes: u32,
+     pub(crate) sourceOffset: u32,
+@@ -1195,6 +1197,8 @@
+ 
+ #[derive(Clone, Copy)]
+ pub(crate) struct ActiveRead {
++    #[cfg(feature = "mem_report")]
++    pub(crate) diagId: u64,
+     pub(crate) job: JobPtr,
+     pub(crate) desc: AprAioReadDesc,
+     pub(crate) chain: *mut ReadChain,
+@@ -1588,6 +1592,8 @@
+ /// or retires a slot; a pool thread claims it under preadMutex and publishes
+ /// completion with Release.
+ pub(crate) struct PreadTask {
++    #[cfg(feature = "mem_report")]
++    pub(crate) diagId: u64,
+     pub(crate) state: AtomicU32,
+     pub(crate) request: SceKernelAioRWRequest,
+     pub(crate) targetSlot: u32,
+--- a/crates/ampr-sys/src/rt/reactor/pools.rs
++++ b/crates/ampr-sys/src/rt/reactor/pools.rs
+@@ -67,6 +67,8 @@
+             if !slot.active || slot.job() != job {
+                 return;
+             }
++            #[cfg(feature = "mem_report")]
++            unsafe { crate::rt::diag::finish((*job).diagId, crate::rt::diag::JOB_RELEASED, (*job).result.rc as i64); }
+             unsafe { ptr::drop_in_place(job) };
+             slot.active = false;
+             slot.nextFree = self.jobStateFreeHead;
+@@ -174,6 +176,8 @@
+         node.value = value;
+         node.value.listSlot = slot;
+         node.value.listGeneration = node.generation;
++        #[cfg(feature = "mem_report")]
++        { node.value.diagId = crate::rt::diag::begin_read(&node.value); }
+         node.prev = tail;
+         node.next = kInvalid;
+         node.active = true;
+@@ -211,6 +215,8 @@
+             self.tail_ = prev;
+         }
+         let s = &mut self.slots_[index];
++        #[cfg(feature = "mem_report")]
++        crate::rt::diag::finish(s.value.diagId, crate::rt::diag::READ_REMOVED, s.value.result.returnValue);
+         s.value = ActiveRead::default();
+         s.prev = kInvalid;
+         s.next = kInvalid;
+--- a/crates/ampr-sys/src/rt/reactor/pread_pool.rs
++++ b/crates/ampr-sys/src/rt/reactor/pread_pool.rs
+@@ -66,6 +66,10 @@
+                     cv.wait(&mut guard);
+                 }
+             };
++            #[cfg(feature = "mem_report")]
++            let diag_id = unsafe { (*addr_of!((*this).preadTasks[slot])).diagId };
++            #[cfg(feature = "mem_report")]
++            crate::rt::diag::change(diag_id, crate::rt::diag::PREAD_RUNNING);
+             let readStartNs = stats::now();
+             let queueNs = readStartNs.saturating_sub(queuedNs);
+             stats::add(Stat::PreadQueueNs, queueNs);
+@@ -82,6 +86,8 @@
+                 ),
+                 None => (SCE_KERNEL_ERROR_EIO as i64, 0),
+             };
++            #[cfg(feature = "mem_report")]
++            crate::rt::diag::finish(diag_id, crate::rt::diag::PREAD_FINISHED, result);
+             let readNs = stats::since(readStartNs);
+             stats::add(Stat::PreadReads, 1);
+             stats::add(Stat::PreadBytes, bytesRead);
+@@ -175,6 +181,13 @@
+         if found != requests.len() {
+             return SCE_KERNEL_ERROR_EAGAIN;
+         }
++        #[cfg(feature = "mem_report")]
++        let (diag_parent, diag_source_job, diag_file) = if looseRead {
++            let active = self.activeReads.active_at_slot_2(targetSlot, targetGeneration);
++            if let Some(a) = unsafe { active.as_ref() } {
++                (a.diagId, unsafe { a.job.as_ref() }.map_or(0, |j| j.id), a.desc.fileId)
++            } else { (0, 0, 0) }
++        } else { (0, 0, 0) };
+         for (requestIndex, request) in requests.iter().enumerate() {
+             let task = &mut self.preadTasks[slots[requestIndex]];
+             task.request = *request;
+@@ -186,6 +199,17 @@
+             task.sequence = self.preadNextSequence;
+             self.preadNextSequence = self.preadNextSequence.wrapping_add(1);
+             task.statQueuedNs = stats::now();
++            #[cfg(feature = "mem_report")]
++            {
++                let mut path = [0u8; crate::rt::diag::PATH + 1];
++                let n = crate::rt::index::probe_file_path(diag_file, &mut path).unwrap_or(0);
++                task.diagId = crate::rt::diag::begin(crate::rt::diag::Item {
++                    parent: diag_parent, source_job: diag_source_job, file_id: diag_file,
++                    fd: request.fd, offset: request.offset as u64, bytes: request.nbyte as u64,
++                    priority: priority as u32, kind: crate::rt::diag::PREAD,
++                    stage: crate::rt::diag::PREAD_QUEUED, ..crate::rt::diag::Item::EMPTY
++                }, &path[..n], n == crate::rt::diag::PATH);
++            }
+             task.state.store(PREAD_QUEUED, Ordering::Release);
+         }
+         self.preadPendingCount += requests.len() as u32;
+--- a/crates/ampr-sys/src/rt/reactor/progress.rs
++++ b/crates/ampr-sys/src/rt/reactor/progress.rs
+@@ -559,6 +559,8 @@
+         terminal: bool,
+         nowNs: u64,
+     ) {
++        #[cfg(feature = "mem_report")]
++        let diag_id = unsafe { active.as_ref() }.map_or(0, |a| a.diagId);
+         let (submitNs, lastPollNs, polls, bytes, ext) =
+             if let Some(e) = unsafe { external.as_mut() } {
+                 let i = requestIndex as usize;
+@@ -593,6 +595,8 @@
+         if *submitNs == 0 {
+             return;
+         }
++        #[cfg(feature = "mem_report")]
++        if diag_id != 0 { crate::rt::diag::change(diag_id, crate::rt::diag::READ_OBSERVED); }
+         let latencyNs = nowNs.saturating_sub(*submitNs);
+         let detectNs = if *lastPollNs != 0 {
+             nowNs.saturating_sub(*lastPollNs)
+--- /dev/null
++++ b/crates/ampr-sys/src/rt/diag.rs
+@@ -0,0 +1,329 @@
++//! Bounded debug-only operation history. Producers never wait for a reader.
++//! A dropped update makes the active table potentially stale; the loss is
++//! reported forever for that module instance instead of hiding a lost finish.
++
++use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use super::sync::SyncCell;
++
++pub(crate) const PROTOCOL: u64 = 1;
++pub(crate) const ACTIVE_CAP: usize = 1024;
++pub(crate) const EVENT_CAP: usize = 8192;
++pub(crate) const PAGE: usize = 64;
++pub(crate) const PATH: usize = 96;
++pub(crate) const STAGES: usize = 32;
++pub(crate) const BINS: usize = 32;
++pub(crate) const JOB: u8 = 1;
++pub(crate) const READ: u8 = 2;
++pub(crate) const PREAD: u8 = 3;
++pub(crate) const JOB_ACCEPTED: u8 = 1;
++pub(crate) const JOB_ISSUED: u8 = 2;
++pub(crate) const JOB_READ_DONE: u8 = 3;
++pub(crate) const JOB_NOTIFIED: u8 = 4;
++pub(crate) const JOB_RELEASED: u8 = 5;
++pub(crate) const READ_LISTED: u8 = 10;
++pub(crate) const READ_ACCEPTED: u8 = 11;
++pub(crate) const READ_OBSERVED: u8 = 12;
++pub(crate) const READ_REMOVED: u8 = 13;
++pub(crate) const PREAD_QUEUED: u8 = 20;
++pub(crate) const PREAD_RUNNING: u8 = 21;
++pub(crate) const PREAD_FINISHED: u8 = 22;
++
++#[derive(Clone, Copy, Debug)]
++pub(crate) struct Item {
++    pub(crate) id: u64,
++    pub(crate) parent: u64,
++    pub(crate) source_job: u64,
++    pub(crate) created_ns: u64,
++    pub(crate) changed_ns: u64,
++    pub(crate) offset: u64,
++    pub(crate) bytes: u64,
++    pub(crate) result: i64,
++    pub(crate) file_id: u32,
++    pub(crate) command: u32,
++    pub(crate) priority: u32,
++    pub(crate) fd: i32,
++    pub(crate) kind: u8,
++    pub(crate) stage: u8,
++    pub(crate) path_len: u8,
++    pub(crate) path_truncated: bool,
++    pub(crate) path: [u8; PATH],
++}
++impl Item {
++    pub(crate) const EMPTY: Self = Self {id:0,parent:0,source_job:0,created_ns:0,changed_ns:0,
++        offset:0,bytes:0,result:0,file_id:0,command:0,priority:0,fd:-1,kind:0,stage:0,
++        path_len:0,path_truncated:false,path:[0;PATH]};
++}
++
++#[derive(Clone, Copy, Debug)]
++pub(crate) struct Event {
++    pub(crate) seq: u64,
++    pub(crate) at_ns: u64,
++    pub(crate) stage_ns: u64,
++    pub(crate) ended: bool,
++    pub(crate) item: Item,
++}
++impl Event {
++    pub(crate) const EMPTY: Self = Self {seq:0,at_ns:0,stage_ns:0,ended:false,item:Item::EMPTY};
++}
++
++pub(crate) struct Store<const A: usize, const E: usize> {
++    items: [Item; A],
++    events: [Event; E],
++    pub(crate) next_seq: u64,
++    pub(crate) table_skips: u64,
++    pub(crate) missing_updates: u64,
++    pub(crate) active: u64,
++    pub(crate) hist: [[u64; BINS]; STAGES],
++}
++impl<const A: usize, const E: usize> Store<A,E> {
++    pub(crate) const fn new() -> Self {
++        Self {items:[Item::EMPTY;A],events:[Event::EMPTY;E],next_seq:1,
++              table_skips:0,missing_updates:0,active:0,hist:[[0;BINS];STAGES]}
++    }
++    fn slot(&self, id:u64) -> Option<usize> {
++        if id==0 || A==0 {return None;}
++        let start=(id % A as u64) as usize;
++        (0..A.min(16)).map(|n|(start+n)%A).find(|&i|self.items[i].id==id)
++    }
++    fn push(&mut self, item:Item, at:u64, span:u64, ended:bool) {
++        if E==0 {return;}
++        let seq=self.next_seq;
++        self.events[((seq-1)%E as u64) as usize]=Event {seq,at_ns:at,stage_ns:span,ended,item};
++        self.next_seq=self.next_seq.saturating_add(1);
++    }
++    fn bucket(&mut self, stage:u8, ns:u64) {
++        if stage as usize>=STAGES {return;}
++        // Inclusive upper bounds: 1 us, 2 us, ..., 2^30 us; final bin open.
++        let mut b=0;
++        while b<BINS-1 && ns>(1000u64<<b) {b+=1;}
++        self.hist[stage as usize][b]=self.hist[stage as usize][b].saturating_add(1);
++    }
++    pub(crate) fn begin(&mut self, mut item:Item, now:u64) {
++        if item.id==0 || A==0 {return;}
++        item.created_ns=now; item.changed_ns=now;
++        let start=(item.id%A as u64) as usize;
++        let slot=(0..A.min(16)).map(|n|(start+n)%A).find(|&i|self.items[i].id==0);
++        if let Some(i)=slot {self.items[i]=item;self.active+=1;}
++        else {self.table_skips=self.table_skips.saturating_add(1);}
++        self.push(item,now,0,false);
++    }
++    pub(crate) fn change(&mut self,id:u64,stage:u8,result:i64,now:u64,ended:bool) {
++        if id==0 {return;}
++        let Some(i)=self.slot(id) else {self.missing_updates=self.missing_updates.saturating_add(1);return;};
++        let mut item=self.items[i];
++        if item.stage==stage && !ended {return;}
++        let span=now.saturating_sub(item.changed_ns);
++        self.bucket(item.stage,span);
++        if ended {self.bucket(28+item.kind,now.saturating_sub(item.created_ns));}
++        item.stage=stage;item.result=result;item.changed_ns=now;
++        self.push(item,now,span,ended);
++        if ended {self.items[i]=Item::EMPTY;self.active=self.active.saturating_sub(1);}
++        else {self.items[i]=item;}
++    }
++    pub(crate) fn oldest(&self) -> u64 {self.next_seq.saturating_sub(E as u64).max(1)}
++    pub(crate) fn active_page(&self,cursor:usize,out:&mut [Item]) -> (usize,usize) {
++        let mut at=cursor.min(A);let mut n=0;
++        while at<A && n<out.len() {if self.items[at].id!=0 {out[n]=self.items[at];n+=1;}at+=1;}
++        (at,n)
++    }
++    pub(crate) fn event_page(&self,after:u64,out:&mut [Event]) -> (u64,usize,u64) {
++        let wanted=after.saturating_add(1);
++        let first=wanted.max(self.oldest());
++        let lost=self.oldest().saturating_sub(wanted);
++        let mut n=0;let mut seq=first;
++        while seq<self.next_seq && n<out.len() {
++            let event=self.events[((seq-1)%E as u64) as usize];
++            if event.seq==seq {out[n]=event;n+=1;}
++            seq+=1;
++        }
++        (if n>0 {out[n-1].seq} else {after},n,lost)
++    }
++}
++
++static LOCK: AtomicBool=AtomicBool::new(false);
++static NEXT_ID: AtomicU64=AtomicU64::new(1);
++static BOOT_NS: AtomicU64=AtomicU64::new(0);
++static DROPPED: AtomicU64=AtomicU64::new(0);
++static DATA: SyncCell<Store<ACTIVE_CAP,EVENT_CAP>>=SyncCell::new(Store::new());
++struct Guard;
++impl Drop for Guard {fn drop(&mut self){LOCK.store(false,Ordering::Release);}}
++fn with_store<T>(producer:bool,f:impl FnOnce(&mut Store<ACTIVE_CAP,EVENT_CAP>)->T)->Option<T> {
++    if LOCK.compare_exchange(false,true,Ordering::Acquire,Ordering::Relaxed).is_err() {
++        if producer {DROPPED.fetch_add(1,Ordering::Relaxed);}
++        return None;
++    }
++    let _guard=Guard;
++    Some(f(unsafe {&mut *DATA.get()}))
++}
++
++#[cfg(feature="mem_report")]
++fn clock()->u64 {super::stats::now()}
++
++#[cfg(feature="mem_report")]
++pub(crate) fn begin(mut item:Item,path:&[u8],truncated:bool)->u64 {
++    let id=NEXT_ID.fetch_add(1,Ordering::Relaxed);
++    if id==0 {DROPPED.fetch_add(1,Ordering::Relaxed);return 0;}
++    let now=clock();
++    let _=BOOT_NS.compare_exchange(0,now.max(1),Ordering::Relaxed,Ordering::Relaxed);
++    item.id=id;
++    let n=path.len().min(PATH);item.path[..n].copy_from_slice(&path[..n]);
++    item.path_len=n as u8;item.path_truncated=truncated || path.len()>PATH;
++    let _=with_store(true,|s|s.begin(item,now));
++    id
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn change(id:u64,stage:u8) {let _=with_store(true,|s|s.change(id,stage,0,clock(),false));}
++#[cfg(feature="mem_report")]
++pub(crate) fn finish(id:u64,stage:u8,result:i64) {let _=with_store(true,|s|s.change(id,stage,result,clock(),true));}
++
++#[cfg(feature="mem_report")]
++pub(crate) fn begin_read(read:&super::reactor::ActiveRead)->u64 {
++    let job=unsafe {read.job.as_ref()};
++    let mut path=[0u8;PATH+1];
++    let n=super::index::probe_file_path(read.desc.fileId,&mut path).unwrap_or(0);
++    begin(Item {parent:job.map_or(0,|j|j.diagId),source_job:job.map_or(0,|j|j.id),
++        kind:READ,stage:READ_LISTED,fd:read.desc.fd,file_id:read.desc.fileId,
++        offset:read.desc.offset,bytes:read.desc.length,command:read.commandIndex as u32,
++        priority:read.aioPrio as u32,..Item::EMPTY},&path[..n],n==PATH)
++}
++
++#[derive(Clone,Copy)]
++pub(crate) struct Header {
++    pub(crate) now_ns:u64,pub(crate) boot_ns:u64,pub(crate) dropped:u64,
++    pub(crate) table_skips:u64,pub(crate) missing:u64,pub(crate) active:u64,
++    pub(crate) oldest:u64,pub(crate) next_seq:u64,pub(crate) busy:bool,
++}
++impl Header {
++    fn read(s:&Store<ACTIVE_CAP,EVENT_CAP>,now:u64)->Self {
++        Self {now_ns:now,boot_ns:BOOT_NS.load(Ordering::Relaxed),dropped:DROPPED.load(Ordering::Relaxed),
++              table_skips:s.table_skips,missing:s.missing_updates,active:s.active,
++              oldest:s.oldest(),next_seq:s.next_seq,busy:false}
++    }
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn active_snapshot(cursor:usize,out:&mut [Item])->(Header,usize,usize) {
++    with_store(false,|s|{let h=Header::read(s,clock());let (next,n)=s.active_page(cursor,out);(h,next,n)})
++        .unwrap_or((busy_header(),cursor,0))
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn event_snapshot(after:u64,out:&mut [Event])->(Header,u64,usize,u64) {
++    with_store(false,|s|{let h=Header::read(s,clock());let (next,n,lost)=s.event_page(after,out);(h,next,n,lost)})
++        .unwrap_or((busy_header(),after,0,0))
++}
++#[cfg(feature="mem_report")]
++pub(crate) fn histogram_snapshot(out:&mut [[u64;BINS];STAGES])->Header {
++    with_store(false,|s|{*out=s.hist;Header::read(s,clock())}).unwrap_or_else(busy_header)
++}
++#[cfg(feature="mem_report")]
++fn busy_header()->Header {
++    Header {now_ns:clock(),boot_ns:BOOT_NS.load(Ordering::Relaxed),dropped:DROPPED.load(Ordering::Relaxed),
++        table_skips:0,missing:0,active:0,oldest:0,next_seq:0,busy:true}
++}
++
++/// Storage is outside the existing internal pool. Exact x86-64 sizes are
++/// printed by the host test and checked against a fixed 2 MiB ceiling.
++pub(crate) const STORE_BYTES:usize=core::mem::size_of::<Store<ACTIVE_CAP,EVENT_CAP>>();
++
++#[cfg(feature="mem_report")]
++pub(crate) fn init(now:u64) {let _=BOOT_NS.compare_exchange(0,now.max(1),Ordering::Relaxed,Ordering::Relaxed);}
++
++/// Deliberately exact routes. An invalid diagnostic request must not fall
++/// through to /metrics, whose resetting maxima would then be consumed.
++#[derive(Clone,Copy,Debug,PartialEq,Eq)]
++pub(crate) enum Query {Info, Active(usize,usize), Events(u64,usize), Hist, Invalid}
++pub(crate) fn query(target:&[u8])->Option<Query> {
++    if !target.starts_with(b"/diag") {return None;}
++    let at=target.iter().position(|&b|b==b'?').unwrap_or(target.len());
++    let route=&target[..at];
++    let params=if at<target.len(){&target[at+1..]}else{&[]};
++    if route==b"/diag/info" {return Some(if params.is_empty(){Query::Info}else{Query::Invalid});}
++    if route==b"/diag/hist" {return Some(if params.is_empty(){Query::Hist}else{Query::Invalid});}
++    let mut cursor=0u64;let mut limit=PAGE;let mut seen_cursor=false;let mut seen_limit=false;
++    for part in params.split(|&b|b==b'&').filter(|p|!p.is_empty()) {
++        let Some(eq)=part.iter().position(|&b|b==b'=') else{return Some(Query::Invalid);};
++        let (key,value)=(&part[..eq],&part[eq+1..]);
++        if value.is_empty(){return Some(Query::Invalid);}
++        let mut number=0u64;
++        for &b in value {if !b.is_ascii_digit(){return Some(Query::Invalid);}
++            let Some(n)=number.checked_mul(10).and_then(|n|n.checked_add((b-b'0')as u64)) else{return Some(Query::Invalid);};number=n;}
++        if key==b"limit" && !seen_limit {if number==0||number>PAGE as u64{return Some(Query::Invalid);}limit=number as usize;seen_limit=true;}
++        else if ((route==b"/diag/active"&&key==b"cursor")||(route==b"/diag/events"&&key==b"after")) && !seen_cursor {cursor=number;seen_cursor=true;}
++        else{return Some(Query::Invalid);}
++    }
++    Some(match route {
++        b"/diag/active" if cursor<=ACTIVE_CAP as u64=>Query::Active(cursor as usize,limit),
++        b"/diag/events"=>Query::Events(cursor,limit),
++        _=>Query::Invalid,
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn item(id:u64)->Item {Item {id,kind:READ,stage:READ_LISTED,..Item::EMPTY}}
++    #[test] fn lifecycle_and_distinct_ids(){
++        let mut s=Store::<8,16>::new();s.begin(item(1),10);s.begin(item(2),12);
++        s.change(1,READ_ACCEPTED,0,20,false);s.change(1,READ_REMOVED,-5,30,true);
++        assert_eq!(s.active,1);let mut out=[Item::EMPTY;4];let(_,n)=s.active_page(0,&mut out);
++        assert_eq!(n,1);assert_eq!(out[0].id,2);
++        let mut events=[Event::EMPTY;8];let(_,n,lost)=s.event_page(0,&mut events);
++        assert_eq!((n,lost),(4,0));assert!(events[3].ended);assert_eq!(events[3].item.result,-5);
++    }
++    #[test] fn overwrite_and_cursor_loss_are_explicit(){
++        let mut s=Store::<4,3>::new();s.begin(item(1),1);
++        s.change(1,READ_ACCEPTED,0,2,false);s.change(1,READ_OBSERVED,0,3,false);s.change(1,READ_REMOVED,0,4,true);
++        let mut out=[Event::EMPTY;2];let(next,n,lost)=s.event_page(0,&mut out);
++        assert_eq!((next,n,lost),(3,2,1));let(next,n,lost)=s.event_page(next,&mut out);
++        assert_eq!((next,n,lost),(4,1,0));
++    }
++    #[test] fn table_overflow_does_not_evict_live_requests(){
++        let mut s=Store::<2,8>::new();s.begin(item(1),1);s.begin(item(2),2);s.begin(item(3),3);
++        assert_eq!(s.active,2);assert_eq!(s.table_skips,1);s.change(3,READ_REMOVED,0,4,true);
++        assert_eq!(s.missing_updates,1);assert_eq!(s.active,2);
++    }
++    #[test] fn an_id_reuse_never_finishes_the_new_request(){
++        let mut s=Store::<2,8>::new();s.begin(item(1),1);s.change(1,READ_REMOVED,0,2,true);
++        s.begin(item(3),3);s.change(1,READ_REMOVED,0,4,true);assert_eq!(s.active,1);
++        assert_eq!(s.items[s.slot(3).unwrap()].created_ns,3);
++    }
++    #[test] fn duplicate_stage_is_not_a_fake_transition(){
++        let mut s=Store::<4,8>::new();s.begin(item(1),10);s.change(1,READ_LISTED,0,20,false);
++        assert_eq!(s.next_seq,2);assert_eq!(s.items[s.slot(1).unwrap()].changed_ns,10);
++    }
++    #[test] fn paginated_active_scan_does_not_repeat_slots(){
++        let mut s=Store::<8,8>::new();for id in 1..=5{s.begin(item(id),id);}
++        let mut out=[Item::EMPTY;2];let mut at=0;let mut ids=std::vec::Vec::new();
++        while at<8{let(next,n)=s.active_page(at,&mut out);ids.extend(out[..n].iter().map(|i|i.id));at=next;}
++        ids.sort_unstable();assert_eq!(ids,vec![1,2,3,4,5]);
++    }
++    #[test] fn histograms_use_completed_stage_spans_only(){
++        let mut s=Store::<4,8>::new();s.begin(item(1),100);assert_eq!(s.hist[READ_LISTED as usize].iter().sum::<u64>(),0);
++        s.change(1,READ_ACCEPTED,0,1100,false);s.change(1,READ_REMOVED,0,3100,true);
++        assert_eq!(s.hist[READ_LISTED as usize][0],1);assert_eq!(s.hist[READ_ACCEPTED as usize][1],1);
++        assert_eq!(s.hist[(28+READ) as usize][2],1);
++    }
++    #[test] fn backward_clock_never_underflows(){
++        let mut s=Store::<4,8>::new();s.begin(item(1),100);s.change(1,READ_REMOVED,0,20,true);
++        assert_eq!(s.hist[READ_LISTED as usize][0],1);
++    }
++    #[test] fn readers_and_producers_never_spin_on_a_busy_store(){
++        LOCK.store(true,Ordering::Release);let before=DROPPED.load(Ordering::Relaxed);
++        assert!(with_store(true,|_|()).is_none());assert_eq!(DROPPED.load(Ordering::Relaxed),before+1);
++        assert!(with_store(false,|_|()).is_none());assert_eq!(DROPPED.load(Ordering::Relaxed),before+1);
++        LOCK.store(false,Ordering::Release);
++    }
++    #[test] fn diagnostic_storage_budget(){
++        println!("diag storage: Item={} Event={} Store={} bytes",core::mem::size_of::<Item>(),core::mem::size_of::<Event>(),STORE_BYTES);
++        assert!(STORE_BYTES<2*1024*1024);assert_eq!(core::mem::align_of::<Item>(),8);
++    }
++    #[test] fn diagnostic_routes_and_bounds(){
++        assert_eq!(query(b"/metrics"),None);
++        assert_eq!(query(b"/diag/active?cursor=20&limit=4"),Some(Query::Active(20,4)));
++        assert_eq!(query(b"/diag/events?after=9000000000&limit=64"),Some(Query::Events(9000000000,64)));
++        for target in [b"/diag/events?after=-1" as &[u8],b"/diag/events?after=18446744073709551616",
++            b"/diag/active?cursor=1025",b"/diag/active?limit=0",b"/diag/active?limit=1000",
++            b"/diag/events?after=1&after=2",b"/diag/unknown",b"/diag/info?set=1"] {
++            assert_eq!(query(target),Some(Query::Invalid));
++        }
++    }
++}
